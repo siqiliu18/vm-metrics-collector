@@ -105,8 +105,11 @@ vm-metrics-collector/
 │       └── Dockerfile
 ├── internal/
 │   ├── metrics/             ← k8s Metrics API client (metrics.k8s.io/v1beta1)
-│   ├── kafka/               ← producer + consumer helpers
-│   └── influx/              ← InfluxDB write/query client
+│   │                           used by: cmd/agent
+│   ├── kafka/               ← producer helper + consumer helper
+│   │                           used by: cmd/agent (producer), cmd/consumer (consumer)
+│   └── influx/              ← InfluxDB write client + query client
+│                               used by: cmd/consumer (write), cmd/api (query)
 ├── grafana/
 │   └── provisioning/
 │       └── datasources/

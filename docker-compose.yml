@@ -1,0 +1,129 @@
+version: "3.9"
+
+services:
+
+  # ─── Kafka (KRaft mode — no Zookeeper needed) ───────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: "Mk3OEYBSD4fcwNTJRAYmpA=="
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "kafka:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─── InfluxDB (time-series DB) ───────────────────────────────────────────────
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: adminpassword
+      DOCKER_INFLUXDB_INIT_ORG: vm-metrics
+      DOCKER_INFLUXDB_INIT_BUCKET: metrics
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: my-super-secret-token
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─── Metrics Agent (pull from kubeconfig clusters) ──────────────────────────
+  agent:
+    build:
+      context: .
+      dockerfile: cmd/agent/Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: vm-metrics-ts
+      SCRAPE_INTERVAL_SECONDS: 15
+      KUBECONFIG: /root/.kube/config
+      # Comma-separated kubeconfig contexts to scrape.
+      # Leave empty to scrape ALL contexts.
+      KUBE_CONTEXTS: "rancher-desktop"
+    volumes:
+      - ~/.kube:/root/.kube:ro   # mount your local kubeconfig read-only
+    restart: on-failure
+
+  # ─── Kafka Consumer + Windowing ──────────────────────────────────────────────
+  consumer:
+    build:
+      context: .
+      dockerfile: cmd/consumer/Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: vm-metrics-ts
+      KAFKA_GROUP_ID: vm-metrics-consumer-group
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_TOKEN: my-super-secret-token
+      INFLUXDB_ORG: vm-metrics
+      INFLUXDB_BUCKET: metrics
+      WINDOW_DURATION_MINUTES: 60
+    restart: on-failure
+
+  # ─── Query API ───────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: cmd/api/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    environment:
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_TOKEN: my-super-secret-token
+      INFLUXDB_ORG: vm-metrics
+      INFLUXDB_BUCKET: metrics
+      API_PORT: 8080
+    restart: on-failure
+
+  # ─── Grafana Dashboard ───────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - influxdb
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    restart: on-failure
+
+volumes:
+  kafka-data:
+  influxdb-data:
+  grafana-data:
