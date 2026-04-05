@@ -1,0 +1,201 @@
+# Docker Compose — Study Notes
+
+## Core Concept
+
+Each entry under `services:` in `docker-compose.yml` becomes one running container.
+`docker-compose up` starts all of them; `docker-compose down` stops them.
+
+---
+
+## Key Fields Explained
+
+### `image:` vs `build:`
+
+```yaml
+# Pull a pre-built image from Docker Hub
+image: confluentinc/cp-kafka:7.6.0
+
+# Build from a local Dockerfile
+build:
+  context: .                        # repo root is the build context
+  dockerfile: cmd/agent/Dockerfile  # which Dockerfile to use
+```
+
+- `image:` — download and run, like installing a pre-built binary
+- `build:` — compile from source first, then run
+- `context: .` matters because it determines what files the Dockerfile can `COPY` from
+
+Run `docker-compose up --build` to force a fresh image build.
+
+---
+
+### `environment:` — Config passed into the container
+
+Equivalent to `docker run -e KEY=VALUE`. The container reads these on startup.
+
+```yaml
+environment:
+  KAFKA_BROKERS: kafka:9092   # Go code reads this via os.Getenv("KAFKA_BROKERS")
+```
+
+There is no universal standard — each image defines which env vars it accepts.
+You learn them from the image's documentation or Docker Hub page. Examples:
+- `DOCKER_INFLUXDB_INIT_*` → defined by the InfluxDB Docker image
+- `KAFKA_LISTENERS`, `KAFKA_NODE_ID` → defined by the Confluent Kafka image
+- `GF_SECURITY_ADMIN_PASSWORD` → defined by the Grafana image
+
+---
+
+### `volumes:` — Persistent storage
+
+Without volumes, all data inside a container is lost when it stops.
+
+There are two syntaxes:
+
+```yaml
+# 1. Named volume (Docker-managed, no slash at start)
+volumes:
+  - kafka-data:/var/lib/kafka/data
+#   ^^^^^^^^^^ just a label; Docker stores it under /var/lib/docker/volumes/
+
+# 2. Bind mount (real folder on your host, starts with ./ or /)
+volumes:
+  - ./grafana/provisioning:/etc/grafana/provisioning
+#   ^^^^^^^^^^^^^^^^^^^^^ actual folder on your laptop
+```
+
+Named volumes must be declared at the bottom of the file:
+```yaml
+volumes:      # tells Docker to create and manage these
+  kafka-data:
+  influxdb-data:
+  grafana-data:
+```
+
+The `:` separator means: `left (host)` → `right (inside container)`.
+
+Delete named volumes with `docker-compose down -v` (the `-v` flag wipes data).
+
+---
+
+### `ports:` — Accessing containers from your laptop
+
+```yaml
+ports:
+  - "9092:9092"   # host_port:container_port
+```
+
+This is **only for host → container** access (e.g., your Mac connecting to `localhost:9092`).
+
+**Other containers do NOT need this** — they communicate over Docker's internal network using service names.
+
+---
+
+### `depends_on:` — Startup ordering
+
+```yaml
+depends_on:
+  kafka:
+    condition: service_healthy   # wait until kafka passes its healthcheck
+```
+
+Prevents a service from starting before its dependencies are ready.
+Combined with `healthcheck:` on the dependency, this ensures Kafka is actually accepting connections before the agent tries to connect.
+
+---
+
+## Container-to-Container Networking
+
+Docker Compose creates a **private network** for all services automatically.
+Every service is reachable by its **service name** as a hostname — no IPs needed.
+
+```
+docker network (private)
+  ├── kafka      → hostname "kafka",    port 9092
+  ├── influxdb   → hostname "influxdb", port 8086
+  ├── agent
+  ├── consumer
+  └── grafana
+```
+
+| Who connects | Address | Why |
+|---|---|---|
+| Containers talking to each other | `kafka:9092` | Docker internal DNS resolves service name → container IP |
+| Your Mac | `localhost:9092` | `ports:` forwarding |
+
+This is why `KAFKA_BROKERS: kafka:9092` appears in `agent` and `consumer` — not `localhost`.
+
+---
+
+## Grafana Provisioning
+
+**Problem:** Grafana stores its config (datasources, dashboards) in an internal database.
+Without provisioning, you'd have to manually click through the UI every time you recreate the container.
+
+**Solution:** Grafana's provisioning feature — drop YAML files into specific folders and Grafana reads them on startup automatically.
+
+```
+/etc/grafana/provisioning/      ← Grafana watches this directory (hardcoded convention)
+  ├── datasources/              ← all .yaml files here become datasources
+  ├── dashboards/               ← dashboard definitions
+  ├── alerting/
+  └── plugins/
+```
+
+`influxdb.yaml` is not a Kubernetes file — it's Grafana's own config format:
+
+```yaml
+apiVersion: 1
+datasources:
+  - name: InfluxDB
+    type: influxdb
+    access: proxy              # Grafana backend makes the HTTP call (not your browser)
+    url: http://influxdb:8086  # service name, not localhost
+    jsonData:
+      version: Flux            # query language (Flux, not the older InfluxQL)
+      organization: vm-metrics
+      defaultBucket: metrics
+    secureJsonData:
+      token: my-super-secret-token
+```
+
+The three values (`organization`, `defaultBucket`, `token`) must exactly match what InfluxDB was initialized with via its `DOCKER_INFLUXDB_INIT_*` env vars.
+
+**How docker-compose delivers the file to Grafana:**
+```yaml
+# docker-compose.yml
+volumes:
+  - ./grafana/provisioning:/etc/grafana/provisioning
+# Mounts the whole folder — Grafana finds datasources/influxdb.yaml naturally
+```
+
+`docker-compose.yml` only knows how to start containers and mount files.
+The application (Grafana) reads those files and acts on them — that's outside docker-compose's responsibility.
+
+---
+
+## Where to Learn Image-Specific Config
+
+There is no way to guess image-specific env vars or folder conventions — always look them up:
+
+| Image | Where to look |
+|---|---|
+| `influxdb:2.7` | hub.docker.com/_/influxdb |
+| `confluentinc/cp-kafka` | docs.confluent.io |
+| `grafana/grafana` | grafana.com/docs → Administration → Provisioning |
+
+---
+
+## Quick Reference — Mental Models
+
+| Concept | Analogy |
+|---|---|
+| `image:` | Download and run a pre-built binary |
+| `build:` | Compile from source, then run |
+| `environment:` | Command-line flags / startup config |
+| `volumes:` | External hard drive plugged into the container |
+| `ports:` | Port forwarding from your laptop into the container |
+| `depends_on:` | "Don't start me until X is healthy" |
+| Named volume | Docker manages the storage location for you |
+| Bind mount | You provide a real folder path from your host |
+| Service name DNS | `kafka` resolves to the kafka container's IP inside the network |
