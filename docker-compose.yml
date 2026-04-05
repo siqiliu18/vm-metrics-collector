@@ -61,6 +61,7 @@ services:
       KAFKA_BROKERS: kafka:9092
       KAFKA_TOPIC: vm-metrics-ts
       SCRAPE_INTERVAL_SECONDS: 15
+      SCRAPE_TIMEOUT_SECONDS: 10   # per-context timeout; prevents slow clusters blocking others
       KUBECONFIG: /root/.kube/config
       # Comma-separated kubeconfig contexts to scrape.
       # Leave empty to scrape ALL contexts.

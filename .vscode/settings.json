@@ -1,0 +1,8 @@
+{
+  "yaml.schemas": {
+    "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/v1.32.1-standalone-strict/_definitions.json": [
+      "k8s/**/*.yaml",
+      "k8s/**/*.yml"
+    ]
+  }
+}

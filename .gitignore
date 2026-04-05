@@ -1,0 +1,12 @@
+# Go binaries
+bin/
+agent
+consumer
+api
+
+# Go build cache
+*.test
+*.out
+
+# Dependency vendor dir (if ever added)
+vendor/
