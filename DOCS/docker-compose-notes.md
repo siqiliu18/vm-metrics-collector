@@ -174,6 +174,65 @@ The application (Grafana) reads those files and acts on them — that's outside 
 
 ---
 
+## Volume Mount Options — Three-Part Syntax
+
+```yaml
+- ~/.kube:/root/.kube:ro
+#  ^^^^^^  ^^^^^^^^^^^  ^^
+#  host    container    options
+```
+
+A third colon adds **mount options**. `ro` = read-only. The container can read the folder but not modify it. Default (no third part) is `rw` (read-write). Using `ro` is a security best practice when the container has no reason to write.
+
+---
+
+## `environment:` vs Application Logic — A Critical Distinction
+
+Docker's only job with env vars is to **pass them into the container**. What happens with them is entirely up to the application code.
+
+Example — the agent's three env vars work together:
+
+```yaml
+KUBECONFIG: /root/.kube/config    # tells Go where the kubeconfig file is
+KUBE_CONTEXTS: "rancher-desktop"  # tells Go which contexts to scrape
+```
+
+```yaml
+volumes:
+  - ~/.kube:/root/.kube:ro        # makes the actual file available at that path
+```
+
+The Go agent code reads and acts on these:
+
+```go
+kubeconfig  := os.Getenv("KUBECONFIG")     // "/root/.kube/config"
+contextsEnv := os.Getenv("KUBE_CONTEXTS")  // "rancher-desktop"
+
+var contexts []string
+if contextsEnv == "" {
+    contexts = getAllContextsFromKubeconfig(kubeconfig)  // scrape ALL clusters
+} else {
+    contexts = strings.Split(contextsEnv, ",")           // scrape specific ones
+}
+
+for _, ctx := range contexts {
+    client := buildK8sClient(kubeconfig, ctx)
+    go scrapeMetrics(client, ctx)
+}
+```
+
+So the three behaviors are **Go logic, not Docker features**:
+
+| `KUBE_CONTEXTS` value | Result |
+|---|---|
+| `"rancher-desktop"` | scrape only rancher-desktop |
+| `"rancher-desktop,cluster-2"` | scrape both |
+| `""` (empty) | scrape all contexts in the kubeconfig |
+
+Docker is just the delivery mechanism. The same pattern applies to every env var in this project — `KAFKA_BROKERS`, `INFLUXDB_URL`, `WINDOW_DURATION_MINUTES`, etc. docker-compose passes them in; the application reads and acts on them.
+
+---
+
 ## Where to Learn Image-Specific Config
 
 There is no way to guess image-specific env vars or folder conventions — always look them up:
