@@ -233,6 +233,61 @@ Docker is just the delivery mechanism. The same pattern applies to every env var
 
 ---
 
+## `host.docker.internal` — Reaching the Host from Inside a Container
+
+Inside a container, `127.0.0.1` means **the container itself** — not your Mac.
+
+This matters for the agent because Rancher Desktop's k8s API listens on your Mac at
+`127.0.0.1:6443`, and `~/.kube/config` has `server: https://127.0.0.1:6443`.
+When the agent runs inside Docker and tries that address, it hits the container's own
+loopback — nothing is there → `connection refused`.
+
+```
+Your Mac
+├── Rancher Desktop → k8s API at 127.0.0.1:6443
+├── ~/.kube/config  → server: https://127.0.0.1:6443
+│
+└── Docker container
+    ├── /root/.kube/config (mounted from ~/.kube/config)
+    │   still says server: https://127.0.0.1:6443
+    │
+    └── app → 127.0.0.1:6443 = container's own loopback → connection refused
+```
+
+**Fix:** Docker injects `host.docker.internal` into every container — it resolves to your
+Mac's IP. Create a patched kubeconfig before running:
+
+```bash
+sed 's/127.0.0.1/host.docker.internal/g' ~/.kube/config > /tmp/docker-kube-config
+
+docker run --name agent-test \
+  -e KUBECONFIG=/root/.kube/config \
+  -e KUBE_CONTEXTS=rancher-desktop \
+  -e SCRAPE_INTERVAL_SECONDS=5 \
+  -v /tmp/docker-kube-config:/root/.kube/config:ro \
+  agent
+```
+
+```
+Your Mac
+├── Rancher Desktop → k8s API at 127.0.0.1:6443
+├── /tmp/docker-kube-config → server: https://host.docker.internal:6443
+│
+└── Docker container
+    ├── /root/.kube/config (mounted from /tmp/docker-kube-config)
+    │   says server: https://host.docker.internal:6443
+    │
+    └── app → host.docker.internal:6443
+                    ↑ Docker resolves to Mac's IP → reaches Rancher Desktop → works
+```
+
+**Note on startup logs:** The agent prints `starting agent: contexts=[...] interval=5s`
+immediately on boot — before the first scrape. The first actual API call happens after
+the first ticker tick (e.g. 5 seconds later). A startup log line does NOT mean the
+scrape succeeded.
+
+---
+
 ## Where to Learn Image-Specific Config
 
 There is no way to guess image-specific env vars or folder conventions — always look them up:

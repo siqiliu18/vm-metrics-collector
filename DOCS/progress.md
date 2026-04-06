@@ -2,7 +2,7 @@
 
 ## World 1 Checkpoints
 
-### Checkpoint 1 — Agent scrapes and logs (no Kafka) [in progress]
+### Checkpoint 1 — Agent scrapes and logs (no Kafka) [DONE]
 
 **Goal:** Prove the agent can connect to Rancher Desktop, call the Kubernetes Metrics API,
 and print node metrics to stdout. No Kafka, no InfluxDB needed yet.
@@ -10,7 +10,7 @@ and print node metrics to stdout. No Kafka, no InfluxDB needed yet.
 **Files to create:**
 - [x] `go.mod` — module definition + dependencies
 - [x] `cmd/agent/main.go` — scrape loop, stdout logging
-- [ ] `cmd/agent/Dockerfile` — build the Go binary
+- [x] `cmd/agent/Dockerfile` — build the Go binary
 
 **What it scrapes** (via `GET /apis/metrics.k8s.io/v1beta1/nodes`):
 
@@ -45,7 +45,38 @@ starting agent: contexts=[rancher-desktop] interval=5s
 [rancher-desktop] node=rancher-desktop                 cpu= 12.3%  mem= 45.6%
 ```
 
-**Test B — via Docker Compose:**
+**Test B — via docker run (single container, no compose):**
+
+Running the agent container requires a patched kubeconfig because `127.0.0.1` inside
+a container means the container itself, not your Mac. Steps:
+
+```bash
+# 1. patch kubeconfig: replace 127.0.0.1 with host.docker.internal
+sed 's/127.0.0.1/host.docker.internal/g' ~/.kube/config > ~/docker-kube/config
+
+# 2. fix tls-server-name indentation in ~/docker-kube/config (under the cluster block):
+#      server: https://host.docker.internal:6443
+#      tls-server-name: localhost       ← must be at same indent level as server:
+#    Without this, TLS cert verification fails because the cert is valid for
+#    "localhost" not "host.docker.internal"
+
+# 3. run
+docker rm agent-test 2>/dev/null
+docker run --name agent-test \
+  -e KUBECONFIG=/root/.kube/config \
+  -e KUBE_CONTEXTS=rancher-desktop \
+  -e SCRAPE_INTERVAL_SECONDS=5 \
+  -v ~/docker-kube:/root/.kube:ro \
+  agent
+```
+
+Expected output:
+```
+starting agent: contexts=[rancher-desktop] interval=5s timeout=10s
+[rancher-desktop] node=lima-rancher-desktop           cpu=  7.1%  mem= 73.6%
+```
+
+**Test C — via Docker Compose:**
 ```bash
 docker-compose up --build agent
 docker-compose logs -f agent
@@ -58,6 +89,11 @@ docker-compose logs -f agent
 - [x] Re-run with `KUBE_CONTEXTS=""` to verify all contexts are scraped
   - result: all contexts found and attempted; unreachable ones log errors and are skipped (correct behavior)
   - NOTE: empty KUBE_CONTEXTS is for debugging only — always set it explicitly in docker-compose to avoid scraping 40+ contexts and hitting network timeouts on each cycle
+- [x] Test B (docker run) passes — confirmed output:
+  ```
+  [rancher-desktop] node=lima-rancher-desktop  cpu=7.1%  mem=73.6%
+  ```
+- [ ] Test C (docker-compose) — pending Checkpoint 2
 
 ---
 
