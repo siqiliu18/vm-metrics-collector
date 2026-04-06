@@ -19,6 +19,36 @@ unrelated to the producer.
 
 ---
 
+## KAFKA_ADVERTISED_LISTENERS — The Two-Step Connection
+
+When a producer connects to Kafka, there are **two steps**:
+
+1. **Bootstrap connection** — client connects to the address you give it (e.g. `localhost:9092`)
+   to fetch cluster metadata
+2. **Actual connection** — Kafka responds with its `KAFKA_ADVERTISED_LISTENERS` address
+   and tells the client "reconnect to me here"
+
+This means even if the bootstrap succeeds, the real connection uses the advertised address.
+In docker-compose:
+```yaml
+KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+```
+
+So Kafka tells every client "reconnect to `kafka:9092`". Inside the Docker network, all
+containers resolve `kafka` via Docker DNS — works fine. But on your Mac, `kafka` is not
+a known hostname → `dial tcp: lookup kafka: no such host`.
+
+**Fix for local development** — add `kafka` to your Mac's hosts file:
+```bash
+echo "127.0.0.1 kafka" | sudo tee -a /etc/hosts
+```
+
+Now your Mac resolves `kafka` → `127.0.0.1` → reaches the Kafka container via the
+`ports: "9092:9092"` mapping. This is the standard workaround when connecting to
+docker-compose Kafka from the host machine.
+
+---
+
 ## Topics and Partitions
 
 ```

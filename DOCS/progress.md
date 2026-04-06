@@ -97,24 +97,50 @@ docker-compose logs -f agent
 
 ---
 
-### Checkpoint 2 — Agent produces to Kafka [ ]
+### Checkpoint 2 — Agent produces to Kafka [DONE]
 
 **Goal:** Replace stdout logging with real Kafka messages.
 Topic: `vm-metrics-ts`, partition key: `vm_id`.
 
-**Files to create/update:**
-- [ ] `internal/kafka/producer.go` — Kafka producer helper
-- [ ] `cmd/agent/main.go` — updated to produce instead of log
+**Files created/updated:**
+- [x] `internal/kafka/producer.go` — Kafka producer helper (sarama SyncProducer)
+- [x] `cmd/agent/main.go` — producer created once in main(), passed to scrape()
 
-**How to verify:**
+**Test — local agent + docker-compose Kafka:**
 ```bash
-docker-compose up --build kafka agent
-# then exec into kafka container and consume from the topic
+# prerequisite: add kafka to /etc/hosts (one-time setup)
+echo "127.0.0.1 kafka" | sudo tee -a /etc/hosts
+# NOTE: needed because KAFKA_ADVERTISED_LISTENERS=kafka:9092 — Kafka tells clients
+# to reconnect to "kafka", which must resolve on your Mac too
+
+# start Kafka only
+docker-compose up kafka
+
+# in another terminal — run agent
+export KUBECONFIG=/Users/siqiliu/.kube/config
+export KUBE_CONTEXTS=rancher-desktop
+export KAFKA_BROKERS=localhost:9092
+export KAFKA_TOPIC=vm-metrics-ts
+export SCRAPE_INTERVAL_SECONDS=5
+go run ./cmd/agent
+
+# in a third terminal — verify messages arrive
 docker-compose exec kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
+  --bootstrap-server kafka:9092 \
   --topic vm-metrics-ts \
   --from-beginning
 ```
+
+Expected consumer output:
+```json
+{"vm_id":"rancher-desktop","hostname":"lima-rancher-desktop","timestamp":1775453494311600000,"cpu_pct":9.8,"mem_pct":76.2}
+```
+
+**What to check:**
+- [x] Messages appear in kafka-console-consumer
+- [x] `vm_id`, `hostname`, `cpu_pct`, `mem_pct` fields present
+- [x] Timestamp is nanoseconds (large number ~1.7e18)
+- [ ] Test via full docker-compose — pending Checkpoint 3
 
 ---
 
