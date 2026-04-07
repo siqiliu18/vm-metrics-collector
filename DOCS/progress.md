@@ -144,22 +144,49 @@ Expected consumer output:
 
 ---
 
-### Checkpoint 3 — Consumer reads Kafka and writes InfluxDB [ ]
+### Checkpoint 3 — Consumer reads Kafka and writes InfluxDB [DONE]
 
 **Goal:** Consumer reads raw messages from Kafka and writes them to InfluxDB immediately
 (real-time path, no windowing yet).
 
-**Files to create:**
-- [ ] `internal/influx/writer.go` — InfluxDB write client
-- [ ] `cmd/consumer/main.go` — Kafka consumer loop + InfluxDB write
-- [ ] `cmd/consumer/Dockerfile`
+**Files created:**
+- [x] `internal/influx/writer.go` — InfluxDB write client (non-blocking WriteAPI)
+- [x] `cmd/consumer/main.go` — Kafka consumer group loop + InfluxDB write
+- [x] `cmd/consumer/Dockerfile` — same two-stage pattern as agent
 
-**How to verify:**
+**Test — docker-compose Kafka + InfluxDB + consumer, local agent:**
 ```bash
-docker-compose up --build
-# check InfluxDB UI at http://localhost:8086 (admin / adminpassword)
+# terminal 1 — start infrastructure + consumer
+docker-compose up --build kafka influxdb consumer
+
+# terminal 2 — run agent locally to produce messages
+export KUBECONFIG=/Users/siqiliu/.kube/config
+export KUBE_CONTEXTS=rancher-desktop
+export KAFKA_BROKERS=localhost:9092
+export KAFKA_TOPIC=vm-metrics-ts
+export SCRAPE_INTERVAL_SECONDS=5
+go run ./cmd/agent
+
+# verify data in InfluxDB UI
+# http://localhost:8086 (admin / adminpassword)
 # Data Explorer → bucket: metrics → measurement: vm_metrics
+# Flux query:
+# from(bucket: "metrics")
+#   |> range(start: -1h)
+#   |> filter(fn: (r) => r._measurement == "vm_metrics")
 ```
+
+**To stop:**
+```bash
+docker-compose stop kafka influxdb consumer
+# named volumes (InfluxDB data) are preserved — use docker-compose down -v to wipe
+```
+
+**What to check:**
+- [x] Consumer starts and joins consumer group
+- [x] Consumer logs metric lines as messages arrive
+- [x] Data visible in InfluxDB Data Explorer
+- [x] `vm_id` and `hostname` appear as tags, `cpu_pct` and `mem_pct` as fields
 
 ---
 
