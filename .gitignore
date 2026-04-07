@@ -1,8 +1,8 @@
-# Go binaries
+# Go binaries (built at repo root without -o flag)
 bin/
-agent
-consumer
-api
+/agent
+/consumer
+/api
 
 # Go build cache
 *.test
