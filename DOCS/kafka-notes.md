@@ -213,3 +213,70 @@ telling Kafka "I've processed up to here — if I restart, start from the next o
 
 In this project the consumer commits the offset **after** flushing the 1-hour window —
 so if it crashes mid-window, it re-reads and recomputes rather than losing data.
+
+---
+
+## 1-Hour Tumbling Window — Interview Question
+
+**Question asked:** "What is a good way to capture 1 hour of data from the topic?"
+
+### What the question is really asking
+
+Kafka already **captures** the data — it retains messages for 7 days (configured via
+`KAFKA_LOG_RETENTION_HOURS`). The real question is: **how do you aggregate 1 hour of
+messages into a single summary record?**
+
+### Tumbling window — the core answer
+
+A tumbling window is a fixed, non-overlapping time bucket:
+
+```
+│── 00:00 ──────────────── 01:00 ──── flush ──── 02:00 ──── flush ──│
+│   accumulate all points            write 1 row             write 1 row
+│   in memory per vm_id              avg/min/max/p95
+```
+
+- "Tumbling" = windows don't overlap — when 01:00 hits, the 00:00–01:00 bucket closes
+  and a fresh 01:00–02:00 bucket opens
+- Contrast with "sliding window" where the window moves continuously
+
+In-memory implementation in the consumer:
+```go
+// per vm_id, accumulate readings during the window
+windows map[string][]float64  // vm_id → []cpu_pct readings
+
+// on each Kafka message:
+windows[metric.VmID] = append(windows[metric.VmID], metric.CPUPct)
+
+// at the hour boundary:
+avg, min, max, p95 := compute(windows[metric.VmID])
+writer.WriteHourlySummary(vmID, avg, min, max, p95)
+windows[metric.VmID] = nil   // reset for next window
+```
+
+### Where Redis fits
+
+Redis is a valid answer to the **follow-up** question: "what if the consumer crashes
+mid-window?"
+
+```
+Without Redis:  crash at 00:45 → lose 45 min of accumulated data → no summary written
+With Redis:     crash at 00:45 → restart → reload window state from Redis → continue
+```
+
+Redis is about **fault tolerance of the window state**, not about capturing the data.
+Introducing Redis in the original question jumps ahead to a production concern before
+answering the core algorithm.
+
+### Kafka Streams — the industry-standard tool
+
+If the interviewer wants a framework answer: **Kafka Streams** has built-in windowing
+(`TimeWindows.ofSizeWithNoGrace(Duration.ofHours(1))`). It handles state, fault
+tolerance, and rebalancing automatically. We use plain `sarama` in this project and
+implement windowing manually — which is fine for a demo and shows deeper understanding.
+
+### Strongest interview answer
+
+1. Lead with tumbling window concept — accumulate in memory, flush at hour boundary
+2. Mention Kafka Streams as the production-grade tool
+3. Add Redis as the fault tolerance layer for window state if crashes are a concern
