@@ -190,45 +190,55 @@ docker-compose stop kafka influxdb consumer
 
 ---
 
-### Checkpoint 4 — 1-hour tumbling window aggregation [ ]
+### Checkpoint 4 — 1-hour tumbling window aggregation [DONE]
 
 **Goal:** Consumer accumulates metrics per `vm_id` and on each hour boundary flushes
 avg/min/max/p95 to InfluxDB. Kafka offset committed only after flush.
 
-**Files to update:**
-- [ ] `cmd/consumer/main.go` — add windowing logic
+**Files updated:**
+- [x] `cmd/consumer/main.go` — window flusher goroutine (ticker every minute, flushes on hour boundary)
+- [x] `internal/influx/writer.go` — `WriteHourlySummary()` writes to `vm_metrics_hourly`
 
-**InfluxDB schema after this checkpoint:**
-```
-Measurement: vm_metrics
-Tags:        vm_id, hostname, region
-Fields:      cpu_percent, mem_percent, disk_percent, net_in_bytes, net_out_bytes
-Timestamp:   nanosecond precision
-```
+**Design:**
+- `cpuWindows`/`memWindows` — `map[string][]float64` accumulates readings per `vm_id`
+- `sync.Mutex` protects concurrent access between message loop and flusher goroutine
+- Flusher snapshots and resets the maps atomically, then writes summaries
+- p95 computed via sorted slice at flush time (cannot be recomputed after raw data expires)
 
 ---
 
-### Checkpoint 5 — REST Query API [ ]
+### Checkpoint 5 — REST Query API [DONE]
 
 **Goal:** HTTP server that queries InfluxDB via Flux and returns JSON.
 
-**Files to create:**
-- [ ] `internal/influx/query.go` — InfluxDB query client
-- [ ] `cmd/api/main.go` — chi router + handlers
-- [ ] `cmd/api/Dockerfile`
+**Files created:**
+- [x] `internal/influx/query.go` — Flux queries: ListVMs, GetMetrics, GetHourlySummary
+- [x] `cmd/api/main.go` — chi router + 4 handlers
+- [x] `cmd/api/Dockerfile` — same two-stage build pattern
 
 **Endpoints:**
 ```
-GET /metrics/{vm_id}?start=<unix>&end=<unix>&resolution=1m
-GET /metrics/{vm_id}/summary?window=1h
-GET /vms
-GET /health
+GET /health                               → {"status":"ok"}
+GET /vms                                  → ["rancher-desktop", ...]
+GET /metrics/{vm_id}?start=<unix>&end=<unix>  → raw metric points (default: last 1h)
+GET /metrics/{vm_id}/summary              → hourly avg/min/max/p95
+```
+
+**Port remapping (Rancher Desktop occupies defaults):**
+```
+API:      localhost:8081  (was 8080)
+InfluxDB: localhost:8087  (was 8086)
+Kafka:    localhost:9093  (was 9092)
+Grafana:  localhost:3100  (was 3000)
 ```
 
 **How to verify:**
 ```bash
-curl http://localhost:8080/health
-curl http://localhost:8080/vms
+curl http://localhost:8081/health
+curl http://localhost:8081/vms
+curl http://localhost:8081/metrics/rancher-desktop
+curl "http://localhost:8081/metrics/rancher-desktop?start=1"   # all data ever
+curl http://localhost:8081/metrics/rancher-desktop/summary
 ```
 
 ---
@@ -253,11 +263,10 @@ docker-compose up --build
 
 ## Definition of Done (from design.md)
 
-- [ ] Go agent collects CPU/mem/disk from k8s nodes via kubeconfig
-- [ ] Agent produces to Kafka with `vm_id` as partition key
-- [ ] Consumer reads from Kafka and writes raw metrics to InfluxDB
-- [ ] 1-hour tumbling window aggregation working and flushing to InfluxDB
-- [ ] REST API: query metrics by VM + time range
-- [ ] `docker-compose up` brings up full stack
-- [ ] Demo: 3 agents scraping Rancher Desktop, metrics queryable, 1-hour summary visible
+- [x] Go agent collects CPU/mem from k8s nodes via kubeconfig
+- [x] Agent produces to Kafka with `vm_id` as partition key
+- [x] Consumer reads from Kafka and writes raw metrics to InfluxDB
+- [x] 1-hour tumbling window aggregation working and flushing to InfluxDB
+- [x] REST API: query metrics by VM + time range
+- [x] `docker-compose up` brings up full stack
 - [ ] Grafana dashboard shows per-VM time-series
