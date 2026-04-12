@@ -75,7 +75,7 @@ from(bucket: "%s")
 		return nil, err
 	}
 
-	var vms []string
+	vms := []string{}
 	for result.Next() {
 		// hint: result.Record().ValueByKey("vm_id")
 		if vmID, ok := result.Record().ValueByKey("vm_id").(string); ok {
@@ -129,7 +129,7 @@ from(bucket: "%s")
 		return nil, err
 	}
 
-	var points []MetricPoint
+	points := []MetricPoint{}
 	for result.Next() {
 		rec := result.Record()
 		point := MetricPoint{
@@ -159,7 +159,7 @@ from(bucket: "%s")
 		return nil, err
 	}
 
-	var summaries []HourlySummary
+	summaries := []HourlySummary{}
 	for result.Next() {
 		rec := result.Record()
 		summaries = append(summaries, HourlySummary{

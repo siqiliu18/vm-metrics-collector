@@ -7,7 +7,7 @@ services:
     image: confluentinc/cp-kafka:7.6.0
     container_name: kafka
     ports:
-      - "9092:9092"
+      - "9093:9092"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -33,7 +33,7 @@ services:
     image: influxdb:2.7
     container_name: influxdb
     ports:
-      - "8086:8086"
+      - "8087:8086"
     environment:
       DOCKER_INFLUXDB_INIT_MODE: setup
       DOCKER_INFLUXDB_INIT_USERNAME: admin
@@ -97,7 +97,7 @@ services:
       context: .
       dockerfile: cmd/api/Dockerfile
     ports:
-      - "8080:8080"
+      - "8081:8080"
     depends_on:
       influxdb:
         condition: service_healthy
@@ -114,7 +114,7 @@ services:
     image: grafana/grafana:10.4.0
     container_name: grafana
     ports:
-      - "3000:3000"
+      - "3100:3000"
     depends_on:
       - influxdb
     environment:

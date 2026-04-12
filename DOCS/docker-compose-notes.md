@@ -300,6 +300,73 @@ There is no way to guess image-specific env vars or folder conventions — alway
 
 ---
 
+## Rancher Desktop — Known Friction with docker-compose
+
+### kubeconfig gets regenerated on every Rancher Desktop restart
+
+Rancher Desktop writes `~/.kube/config` fresh on each restart. The `rancher-desktop`
+cluster entry always comes back with `server: https://127.0.0.1:6443`.
+
+Inside a docker-compose container, `127.0.0.1` refers to the container itself — not
+your Mac — so the agent fails with `connection refused`.
+
+**Fix (must re-apply after every Rancher Desktop restart):**
+
+In `~/.kube/config`, find the `rancher-desktop` cluster entry and change two lines:
+
+```yaml
+# before (what Rancher Desktop writes)
+  - name: rancher-desktop
+    cluster:
+      server: https://127.0.0.1:6443
+
+# after (what docker-compose needs)
+  - name: rancher-desktop
+    cluster:
+      server: https://host.docker.internal:6443
+      tls-server-name: localhost   # cert is issued for "localhost", not "host.docker.internal"
+```
+
+Then restart the agent container:
+```bash
+docker-compose restart agent
+```
+
+### Port conflicts with Rancher Desktop's SSH tunnels
+
+Rancher Desktop opens SSH tunnels that occupy common ports on your Mac:
+`3000`, `8080`, `8086`, `9092` — exactly the defaults for Grafana, the API,
+InfluxDB, and Kafka.
+
+**Fix:** remap host-side ports in `docker-compose.yml` (container-internal ports
+stay the same — services still talk to each other via `kafka:9092`, `influxdb:8086`):
+
+```yaml
+kafka:    ports: ["9093:9092"]
+influxdb: ports: ["8087:8086"]
+api:      ports: ["8081:8080"]
+grafana:  ports: ["3100:3000"]
+```
+
+Access from your Mac: `localhost:9093`, `localhost:8087`, `localhost:8081`, `localhost:3100`.
+
+### Is Rancher Desktop the ideal test environment?
+
+**Short answer: good enough for a local demo, not ideal for production-like testing.**
+
+| Concern | Rancher Desktop | Ideal alternative |
+|---|---|---|
+| Port conflicts | SSH tunnels steal common ports | A plain Linux VM or remote k8s cluster |
+| kubeconfig stability | Regenerated on every restart | Static kubeconfig (remote cluster) |
+| k8s node count | Always 1 node (lima VM) | Multi-node cluster for realistic metrics |
+| Availability | Tied to your Mac being on | Cloud k8s cluster (EKS, GKE, etc.) |
+
+For this project's purpose (portfolio demo, interview prep), Rancher Desktop is fine.
+The real clusters (your IBM/fyre clusters) in `~/.kube/config` would give a more
+realistic multi-node picture — but they require VPN and live outside your Mac.
+
+---
+
 ## Quick Reference — Mental Models
 
 | Concept | Analogy |
