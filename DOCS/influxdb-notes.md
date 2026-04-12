@@ -132,28 +132,86 @@ Key concepts:
 
 ---
 
+## p95 — Why Percentiles Matter More Than Averages
+
+**p95 (95th percentile):** sort all values, take the value 95% of the way through.
+Means "95% of readings were below this number."
+
+```
+Example CPU readings over 1 hour (simplified):
+[5, 7, 8, 8, 9, 10, 11, 12, 45, 98]  ← sorted
+
+avg = 21.3%   → "CPU is fine"
+p95 = 45%     → "CPU spikes to 45% for 5% of the time" ← what causes user issues
+max = 98%     → "hit 98% once" (blip or real problem?)
+```
+
+Averages hide spikes. p95 captures the "tail" experience — what most users see when
+things get slow. It is the standard SRE metric for latency and resource utilization.
+
+**p95 cannot be recomputed after raw data is deleted.** You must have all raw values
+at computation time. This is why the consumer pre-computes it during the 1-hour window
+before raw points expire.
+
+---
+
 ## InfluxDB in This Project
+
+### Two measurements — raw and hourly
+
+```
+vm_metrics          (raw)     — written every 15s per node
+vm_metrics_hourly   (summary) — written once per hour per vm_id
+```
+
+| | vm_metrics | vm_metrics_hourly |
+|---|---|---|
+| Written by | consumer on each Kafka message | consumer at hour boundary |
+| Retention | 7 days (then deleted) | forever (long-term trends) |
+| Use for | "what is CPU right now?" | "what was avg/p95 CPU last month?" |
+| Fields | cpu_pct, mem_pct | cpu_avg, cpu_min, cpu_max, cpu_p95, mem_* |
+
+### Retention strategy — downsampling
+
+```
+Day 1–7:   both raw and hourly exist
+Day 8+:    only hourly survives — raw is auto-deleted by retention policy
+
+Query "last 6 hours"  → use vm_metrics        (granular, real-time)
+Query "last 6 months" → use vm_metrics_hourly  (raw is gone, summary lives on)
+```
+
+This is the standard **downsampling** pattern used by Datadog, Prometheus (recording
+rules), and all production metrics pipelines. Raw data is expensive; summaries are cheap.
 
 ### Schema
 
 ```
 Measurement: vm_metrics
-Tags:    vm_id     — context name (e.g. "rancher-desktop")
-         hostname  — node name (e.g. "lima-rancher-desktop")
-Fields:  cpu_pct   — CPU usage percent (float)
-         mem_pct   — memory usage percent (float)
+Tags:    vm_id, hostname
+Fields:  cpu_pct, mem_pct
 Time:    nanosecond Unix timestamp
+
+Measurement: vm_metrics_hourly
+Tags:    vm_id
+Fields:  cpu_avg, cpu_min, cpu_max, cpu_p95
+         mem_avg, mem_min, mem_max, mem_p95
+Time:    timestamp of the hour boundary
 ```
 
 ### Write flow
 
 ```
-agent scrapes k8s
+agent scrapes k8s every 15s
   └── produces JSON to Kafka
-        └── consumer reads Kafka
-              └── writer.Write(metric) → buffers in WriteAPI
-                    └── WriteAPI sends to InfluxDB in background
-                          └── Grafana queries InfluxDB via Flux
+        └── consumer reads Kafka message
+              ├── Write(metric)          → vm_metrics (raw, immediate)
+              └── append to cpuWindows/memWindows (in-memory accumulator)
+
+consumer every minute checks clock
+  └── if hour changed:
+        └── stats(cpuWindows[vmID])     → avg/min/max/p95
+              └── WriteHourlySummary()  → vm_metrics_hourly
 ```
 
 ### Verifying writes

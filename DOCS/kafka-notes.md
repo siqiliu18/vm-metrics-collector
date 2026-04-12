@@ -280,3 +280,38 @@ implement windowing manually — which is fine for a demo and shows deeper under
 1. Lead with tumbling window concept — accumulate in memory, flush at hour boundary
 2. Mention Kafka Streams as the production-grade tool
 3. Add Redis as the fault tolerance layer for window state if crashes are a concern
+
+### Why not just let InfluxDB or Grafana compute the average?
+
+Both InfluxDB (via Flux queries) and Grafana (via panel aggregation) can compute
+averages on the fly — so why pre-compute in the consumer?
+
+**Three reasons:**
+
+**1. Scale** — raw data grows fast:
+```
+100 VMs × 4 points/min × 60min × 24h × 30 days = 17M points
+Query-time avg must scan all 17M points every dashboard load.
+Pre-computed: 100 VMs × 24h × 30 days = 72K summary rows — always fast.
+```
+
+**2. p95 cannot be recomputed after raw data is deleted**
+p95 requires the full list of raw values at computation time. Once raw points
+expire (7-day retention), the p95 for that hour is gone unless you saved it.
+Avg and sum can be approximated later; percentiles cannot.
+
+**3. Retention strategy — downsampling**
+```
+vm_metrics        (raw, every 15s)  → keep 7 days  → then delete
+vm_metrics_hourly (summary, 1/hour) → keep forever
+
+Day 1–7:   both raw and hourly exist
+Day 8+:    only hourly survives
+
+Query "last 6 hours"  → use raw points     (granular, real-time)
+Query "last 6 months" → use hourly summary (raw is gone)
+```
+
+This is the standard **downsampling** pattern used by Datadog, Prometheus (recording
+rules), and every production metrics pipeline at scale. The interviewer was testing
+whether you know this pattern — not whether you know how to compute an average.
