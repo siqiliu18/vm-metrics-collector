@@ -15,47 +15,52 @@ The agent reads node metrics from Kubernetes clusters via kubeconfig and pushes 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    subgraph VMs["VM Nodes (k8s clusters)"]
-        vm1["VM Node 1"]
-        vm2["VM Node 2"]
-        vm3["VM Node 3"]
+flowchart TB
+    subgraph k8s["k8s Clusters (via kubeconfig)"]
+        vm1["Node 1"]
+        vm2["Node 2"]
+        vm3["Node 3"]
     end
 
-    subgraph Agents["Go Agent (one per context)"]
-        ag1["Go Agent\ncpu / mem / disk"]
-        ag2["Go Agent\ncpu / mem / disk"]
-        ag3["Go Agent\ncpu / mem / disk"]
-    end
-
-    subgraph Pipeline["Pipeline"]
+    subgraph write_path["Write Path"]
+        direction LR
+        agent["cmd/agent\n(scrapes every 15s)"]
         kafka["Kafka\nTopic: vm-metrics-ts\nKey: vm_id"]
-        consumer["Go Consumer\n+ 1h Tumbling Window"]
+        consumer["cmd/consumer\n(Kafka consumer group)"]
+        window["1h Tumbling Window\n(in-memory per vm_id)"]
     end
 
-    subgraph Storage["Storage & Query"]
-        influx["InfluxDB\ntime-series DB"]
-        api["Query API\nGo HTTP"]
-        grafana["Grafana\nDashboard"]
+    subgraph storage["InfluxDB"]
+        raw["vm_metrics\n(raw, every 15s)\nretain 7 days"]
+        hourly["vm_metrics_hourly\n(avg/min/max/p95)\nretain forever"]
     end
 
-    vm1 --> ag1
-    vm2 --> ag2
-    vm3 --> ag3
+    subgraph read_path["Read Path — two independent consumers of InfluxDB"]
+        direction LR
+        grafana["Grafana :3000\nqueries InfluxDB directly\nvia influxdb.yaml datasource"]
+        api["cmd/api :8080\ninternal/influx/query.go\nREST endpoints for code/scripts"]
+    end
 
-    ag1 -->|push| kafka
-    ag2 -->|push| kafka
-    ag3 -->|push| kafka
+    browser["Browser / curl / scripts"]
+    you["You (browser)"]
 
+    vm1 & vm2 & vm3 -->|"k8s Metrics API"| agent
+    agent -->|"JSON, key=vm_id"| kafka
     kafka -->|consume| consumer
-    consumer -->|write| influx
-    influx --> api
-    api --> grafana
+    consumer -->|"Write() — immediate"| raw
+    consumer --> window
+    window -->|"flush at hour boundary\nWriteHourlySummary()"| hourly
 
-    style VMs fill:#dbe4ff,stroke:#4a9eed
-    style Agents fill:#e5dbff,stroke:#8b5cf6
-    style Pipeline fill:#fff3bf,stroke:#f59e0b
-    style Storage fill:#d3f9d8,stroke:#22c55e
+    raw & hourly -->|Flux query| grafana
+    raw & hourly -->|Flux query\ninternal/influx/query.go| api
+
+    you -->|"localhost:3000"| grafana
+    browser -->|"GET /vms\nGET /metrics/{vm_id}"| api
+
+    style write_path fill:#fff3bf,stroke:#f59e0b
+    style storage fill:#d3f9d8,stroke:#22c55e
+    style read_path fill:#dbe4ff,stroke:#4a9eed
+    style k8s fill:#e5dbff,stroke:#8b5cf6
 ```
 
 ### World 1 — docker-compose network layout
