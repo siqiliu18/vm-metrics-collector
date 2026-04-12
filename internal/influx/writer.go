@@ -43,6 +43,31 @@ func (w *Writer) Close() {
 	w.client.Close()
 }
 
+// Stats holds the computed aggregates for one vm_id over a 1-hour window.
+type Stats struct {
+	Avg float64
+	Min float64
+	Max float64
+	P95 float64
+}
+
+// WriteHourlySummary writes avg/min/max/p95 for one vm_id to a separate
+// measurement so hourly summaries are queryable independently of raw points.
+func (w *Writer) WriteHourlySummary(vmID string, cpu, mem Stats) {
+	point := influxdb2.NewPointWithMeasurement("vm_metrics_hourly").
+		AddTag("vm_id", vmID).
+		AddField("cpu_avg", cpu.Avg).
+		AddField("cpu_min", cpu.Min).
+		AddField("cpu_max", cpu.Max).
+		AddField("cpu_p95", cpu.P95).
+		AddField("mem_avg", mem.Avg).
+		AddField("mem_min", mem.Min).
+		AddField("mem_max", mem.Max).
+		AddField("mem_p95", mem.P95).
+		SetTime(time.Now())
+	w.writeApi.WritePoint(point)
+}
+
 // Write sends one NodeMetric to InfluxDB as a data point.
 //
 // InfluxDB data model:
