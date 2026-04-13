@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vm-metrics-agent
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vm-metrics-agent
+  template:
+    metadata:
+      labels:
+        app: vm-metrics-agent
+    spec:
+      serviceAccountName: vm-metrics-agent   # mounts ServiceAccount token automatically
+      containers:
+        - name: agent
+          image: REGISTRY/vm-metrics-agent:latest   # replace with your registry
+          env:
+            # CLUSTER_NAME is used as the vm_id tag in InfluxDB.
+            # Set this to a unique name per cluster — e.g. "sql107", "sql108".
+            # No KUBECONFIG is set → agent detects in-cluster mode automatically.
+            - name: CLUSTER_NAME
+              value: "REPLACE_ME"             # e.g. sql107
+            - name: KAFKA_BROKERS
+              value: "REPLACE_ME:9092"        # Kafka LoadBalancer external IP or hostname
+            - name: KAFKA_TOPIC
+              value: "vm-metrics-ts"
+            - name: SCRAPE_INTERVAL_SECONDS
+              value: "15"
+            - name: SCRAPE_TIMEOUT_SECONDS
+              value: "10"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"

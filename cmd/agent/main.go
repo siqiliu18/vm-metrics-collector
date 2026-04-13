@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	metricsv1beta1 "k8s.io/metrics/pkg/client/clientset/versioned"
@@ -20,33 +21,14 @@ import (
 
 func main() {
 	// 1. Read env vars
-	contextsEnv := os.Getenv("KUBE_CONTEXTS")           // "rancher-desktop" or "ctx-a,ctx-b" or ""
-	intervalStr := os.Getenv("SCRAPE_INTERVAL_SECONDS") // "15"
-	timeoutStr  := os.Getenv("SCRAPE_TIMEOUT_SECONDS")  // "10"
-	kafkaBrokers := os.Getenv("KAFKA_BROKERS")          // "kafka:9092"
-	kafkaTopic   := os.Getenv("KAFKA_TOPIC")            // "vm-metrics-ts"
+	clusterName  := os.Getenv("CLUSTER_NAME")            // World 2: "sql107" — used as vm_id label
+	contextsEnv  := os.Getenv("KUBE_CONTEXTS")           // World 1: "rancher-desktop,sql107" or ""
+	intervalStr  := os.Getenv("SCRAPE_INTERVAL_SECONDS") // "15"
+	timeoutStr   := os.Getenv("SCRAPE_TIMEOUT_SECONDS")  // "10"
+	kafkaBrokers := os.Getenv("KAFKA_BROKERS")           // "kafka:9092" or "<LB-IP>:9092"
+	kafkaTopic   := os.Getenv("KAFKA_TOPIC")             // "vm-metrics-ts"
 
-	// 2. Load and merge all kubeconfig files listed in KUBECONFIG env var.
-	// client-go reads KUBECONFIG automatically (supports colon-separated paths).
-	// e.g. KUBECONFIG=/root/.kube/config:/root/creds/cluster-a.yaml
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	apiConfig, err := loadingRules.Load()
-	if err != nil {
-		log.Fatalf("failed to load kubeconfig: %v", err)
-	}
-
-	// 3. Determine which contexts to scrape
-	var kubeContexts []string
-	if contextsEnv == "" {
-		// scrape all contexts found across all loaded kubeconfig files
-		for name := range apiConfig.Contexts {
-			kubeContexts = append(kubeContexts, name)
-		}
-	} else {
-		kubeContexts = strings.Split(contextsEnv, ",")
-	}
-
-	// 4. Parse scrape interval (default 15s) and timeout (default 10s)
+	// 2. Parse scrape interval (default 15s) and timeout (default 10s)
 	interval := 15
 	if intervalStr != "" {
 		if v, err := strconv.Atoi(intervalStr); err == nil {
@@ -60,33 +42,84 @@ func main() {
 		}
 	}
 
-	// 5. Create Kafka producer once — reused across all scrapes
+	// 3. Create Kafka producer once — reused across all scrapes
 	producer, err := kafka.NewProducer(kafkaBrokers)
 	if err != nil {
 		log.Fatalf("failed to create kafka producer: %v", err)
 	}
 	defer producer.Close()
 
-	log.Printf("starting agent: contexts=%v interval=%ds timeout=%ds", kubeContexts, interval, timeout)
+	// 4. Detect World 1 vs World 2 based on KUBECONFIG env var.
+	//
+	// World 2 (in-cluster): KUBECONFIG is not set — the pod's ServiceAccount token
+	//   is automatically mounted at /var/run/secrets/kubernetes.io/serviceaccount/
+	//   rest.InClusterConfig() reads it. One rest.Config, one cluster, CLUSTER_NAME
+	//   is used as the vm_id tag.
+	//
+	// World 1 (kubeconfig): KUBECONFIG is set — load and merge kubeconfig files,
+	//   scrape each context in its own goroutine. Context name is used as vm_id tag.
+	if os.Getenv("KUBECONFIG") == "" {
+		runInCluster(clusterName, interval, timeout, producer, kafkaTopic)
+	} else {
+		runWithKubeconfig(contextsEnv, interval, timeout, producer, kafkaTopic)
+	}
+}
 
-	// 6. Scrape loop — each context runs in its own goroutine so a slow/unreachable
-	// cluster does not block others from being scraped on time.
+// runInCluster is the World 2 path. Uses the pod's ServiceAccount token to
+// authenticate to the local cluster API — no kubeconfig file, no VPN needed.
+// CLUSTER_NAME env var is used as the vm_id tag in InfluxDB.
+func runInCluster(clusterName string, interval, timeout int, producer *kafka.Producer, topic string) {
+	if clusterName == "" {
+		log.Fatal("CLUSTER_NAME must be set when running in-cluster (KUBECONFIG not set)")
+	}
+
+	restConfig, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatalf("failed to build in-cluster config: %v", err)
+	}
+
+	log.Printf("starting agent (in-cluster): cluster=%s interval=%ds timeout=%ds", clusterName, interval, timeout)
+
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		go scrapeWithConfig(restConfig, clusterName, time.Duration(timeout)*time.Second, producer, topic)
+	}
+}
+
+// runWithKubeconfig is the World 1 path. Loads kubeconfig files listed in KUBECONFIG
+// env var, scrapes each context in its own goroutine. Context name is used as vm_id.
+func runWithKubeconfig(contextsEnv string, interval, timeout int, producer *kafka.Producer, topic string) {
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	apiConfig, err := loadingRules.Load()
+	if err != nil {
+		log.Fatalf("failed to load kubeconfig: %v", err)
+	}
+
+	var kubeContexts []string
+	if contextsEnv == "" {
+		for name := range apiConfig.Contexts {
+			kubeContexts = append(kubeContexts, name)
+		}
+	} else {
+		kubeContexts = strings.Split(contextsEnv, ",")
+	}
+
+	log.Printf("starting agent (kubeconfig): contexts=%v interval=%ds timeout=%ds", kubeContexts, interval, timeout)
+
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		for _, kubeContext := range kubeContexts {
-			go scrape(apiConfig, kubeContext, time.Duration(timeout)*time.Second, producer, kafkaTopic)
+			go scrapeFromContext(apiConfig, kubeContext, time.Duration(timeout)*time.Second, producer, topic)
 		}
 	}
 }
 
-// scrape connects to one k8s context and logs node metrics.
-// timeout bounds how long a single scrape attempt may take.
-func scrape(apiConfig *clientcmdapi.Config, kubeContext string, timeout time.Duration, producer *kafka.Producer, topic string) {
-	// Build a rest.Config scoped to this specific context.
-	// NewNonInteractiveClientConfig picks the right cluster URL + credentials
-	// from the merged apiConfig using the context name as the key.
+// scrapeFromContext builds a rest.Config for one kubeconfig context, then scrapes.
+func scrapeFromContext(apiConfig *clientcmdapi.Config, kubeContext string, timeout time.Duration, producer *kafka.Producer, topic string) {
 	restConfig, err := clientcmd.NewNonInteractiveClientConfig(
 		*apiConfig,
 		kubeContext,
@@ -97,61 +130,57 @@ func scrape(apiConfig *clientcmdapi.Config, kubeContext string, timeout time.Dur
 		log.Printf("[%s] failed to build rest config: %v", kubeContext, err)
 		return
 	}
+	scrapeWithConfig(restConfig, kubeContext, timeout, producer, topic)
+}
 
-	// Two clients needed:
-	// - metricsClient: calls /apis/metrics.k8s.io/v1beta1/nodes → current usage
-	// - k8sClient:     calls /api/v1/nodes → allocatable capacity (to compute percent)
+// scrapeWithConfig is the shared scrape logic used by both World 1 and World 2.
+// vmID is the label written to InfluxDB — context name in World 1, CLUSTER_NAME in World 2.
+func scrapeWithConfig(restConfig *rest.Config, vmID string, timeout time.Duration, producer *kafka.Producer, topic string) {
 	metricsClient, err := metricsv1beta1.NewForConfig(restConfig)
 	if err != nil {
-		log.Printf("[%s] failed to create metrics client: %v", kubeContext, err)
+		log.Printf("[%s] failed to create metrics client: %v", vmID, err)
 		return
 	}
 	k8sClient, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
-		log.Printf("[%s] failed to create k8s client: %v", kubeContext, err)
+		log.Printf("[%s] failed to create k8s client: %v", vmID, err)
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// Fetch current resource usage per node
 	nodeMetricsList, err := metricsClient.MetricsV1beta1().NodeMetricses().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		log.Printf("[%s] failed to list node metrics: %v", kubeContext, err)
+		log.Printf("[%s] failed to list node metrics: %v", vmID, err)
 		return
 	}
 
 	for _, nm := range nodeMetricsList.Items {
-		// Fetch node to get allocatable capacity
 		node, err := k8sClient.CoreV1().Nodes().Get(ctx, nm.Name, metav1.GetOptions{})
 		if err != nil {
-			log.Printf("[%s] failed to get node %s: %v", kubeContext, nm.Name, err)
+			log.Printf("[%s] failed to get node %s: %v", vmID, nm.Name, err)
 			continue
 		}
 
 		allocCPU := node.Status.Allocatable[corev1.ResourceCPU]
 		allocMem := node.Status.Allocatable[corev1.ResourceMemory]
-
 		usageCPU := nm.Usage[corev1.ResourceCPU]
 		usageMem := nm.Usage[corev1.ResourceMemory]
 
-		// resource.Quantity.MilliValue() → int64 millicores (1 core = 1000m)
-		// resource.Quantity.Value()      → int64 bytes
 		cpuPct := float64(usageCPU.MilliValue()) / float64(allocCPU.MilliValue()) * 100
 		memPct := float64(usageMem.Value()) / float64(allocMem.Value()) * 100
 
-		log.Printf("[%s] node=%-30s cpu=%5.1f%%  mem=%5.1f%%",
-			kubeContext, nm.Name, cpuPct, memPct)
+		log.Printf("[%s] node=%-30s cpu=%5.1f%%  mem=%5.1f%%", vmID, nm.Name, cpuPct, memPct)
 
 		if err := producer.Publish(topic, kafka.NodeMetric{
-			VmID:      kubeContext,
+			VmID:      vmID,
 			Hostname:  nm.Name,
 			Timestamp: time.Now().UnixNano(),
 			CPUPct:    cpuPct,
 			MemPct:    memPct,
 		}); err != nil {
-			log.Printf("[%s] failed to publish metric for node %s: %v", kubeContext, nm.Name, err)
+			log.Printf("[%s] failed to publish metric for node %s: %v", vmID, nm.Name, err)
 		}
 	}
 }
