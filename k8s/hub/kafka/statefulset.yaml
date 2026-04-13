@@ -1,0 +1,92 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+
+---
+# Kafka in KRaft mode (no Zookeeper).
+# Single broker for simplicity — scale replicas to 3 for production
+# (requires updating KAFKA_CONTROLLER_QUORUM_VOTERS and per-pod NODE_ID logic).
+#
+# Two listeners:
+#   PLAINTEXT  :9092 — internal, used by consumer pod inside the hub cluster
+#   EXTERNAL   :9094 — used by agent pods on other clusters via LoadBalancer
+#
+# Why two listeners?
+#   Kafka tells connecting clients "reconnect to my advertised address".
+#   Internal clients get the headless DNS name (resolvable inside the cluster).
+#   External clients get the LoadBalancer IP (resolvable from anywhere).
+#   A single listener would advertise one address that only works for one side.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: monitoring
+spec:
+  serviceName: kafka-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+        - name: kafka
+          image: confluentinc/cp-kafka:7.6.0
+          ports:
+            - containerPort: 9092   # PLAINTEXT — internal
+            - containerPort: 9093   # CONTROLLER — KRaft
+            - containerPort: 9094   # EXTERNAL — agents from other clusters
+          env:
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker,controller"
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              # PLAINTEXT advertises the stable headless DNS — resolvable inside the cluster
+              # EXTERNAL advertises the LoadBalancer IP — resolvable from agent pods on other clusters
+              # Replace KAFKA_LB_IP with the actual LoadBalancer IP after `kubectl get svc kafka-external`
+              value: "PLAINTEXT://kafka-0.kafka-headless.monitoring.svc.cluster.local:9092,EXTERNAL://REPLACE_KAFKA_LB_IP:9094"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@kafka-0.kafka-headless.monitoring.svc.cluster.local:9093"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_LOG_DIRS
+              value: "/var/lib/kafka/data"
+            - name: CLUSTER_ID
+              value: "Mk3OEYBSD4fcwNTJRAYmpA=="
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/lib/kafka/data
+          readinessProbe:
+            exec:
+              command: ["kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi

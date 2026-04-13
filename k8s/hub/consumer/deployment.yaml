@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: consumer
+  template:
+    metadata:
+      labels:
+        app: consumer
+    spec:
+      containers:
+        - name: consumer
+          image: REGISTRY/vm-metrics-consumer:latest   # replace with your registry
+          env:
+            # Consumer is inside the hub cluster — uses PLAINTEXT internal listener
+            - name: KAFKA_BROKERS
+              value: "kafka-0.kafka-headless.monitoring.svc.cluster.local:9092"
+            - name: KAFKA_TOPIC
+              value: "vm-metrics-ts"
+            - name: KAFKA_GROUP_ID
+              value: "vm-metrics-consumer-group"
+            - name: INFLUXDB_URL
+              value: "http://influxdb.monitoring.svc.cluster.local:8086"
+            - name: INFLUXDB_TOKEN
+              value: "my-super-secret-token"
+            - name: INFLUXDB_ORG
+              value: "vm-metrics"
+            - name: INFLUXDB_BUCKET
+              value: "metrics"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "300m"
+              memory: "256Mi"

@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          image: REGISTRY/vm-metrics-api:latest   # replace with your registry
+          ports:
+            - containerPort: 8080
+          env:
+            - name: INFLUXDB_URL
+              value: "http://influxdb.monitoring.svc.cluster.local:8086"
+            - name: INFLUXDB_TOKEN
+              value: "my-super-secret-token"
+            - name: INFLUXDB_ORG
+              value: "vm-metrics"
+            - name: INFLUXDB_BUCKET
+              value: "metrics"
+            - name: API_PORT
+              value: "8080"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: monitoring
+spec:
+  type: NodePort
+  selector:
+    app: api
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30080

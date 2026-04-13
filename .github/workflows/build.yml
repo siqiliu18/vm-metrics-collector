@@ -1,0 +1,45 @@
+name: Build and push images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # needed to push to ghcr.io
+
+    strategy:
+      matrix:
+        include:
+          - name: vm-metrics-agent
+            dockerfile: cmd/agent/Dockerfile
+          - name: vm-metrics-consumer
+            dockerfile: cmd/consumer/Dockerfile
+          - name: vm-metrics-api
+            dockerfile: cmd/api/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # automatically provided, no setup needed
+
+      - name: Build and push ${{ matrix.name }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}:latest

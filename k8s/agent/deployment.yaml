@@ -22,9 +22,9 @@ spec:
             # Set this to a unique name per cluster — e.g. "sql107", "sql108".
             # No KUBECONFIG is set → agent detects in-cluster mode automatically.
             - name: CLUSTER_NAME
-              value: "REPLACE_ME"             # e.g. sql107
+              value: "REPLACE_CLUSTER_NAME"   # e.g. sql107
             - name: KAFKA_BROKERS
-              value: "REPLACE_ME:9092"        # Kafka LoadBalancer external IP or hostname
+              value: "REPLACE_KAFKA_IP:9094"  # Kafka LoadBalancer external IP
             - name: KAFKA_TOPIC
               value: "vm-metrics-ts"
             - name: SCRAPE_INTERVAL_SECONDS

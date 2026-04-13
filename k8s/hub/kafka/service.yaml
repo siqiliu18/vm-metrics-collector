@@ -1,0 +1,36 @@
+# Headless service — gives each broker a stable DNS name.
+# kafka-0.kafka-headless.monitoring.svc.cluster.local
+# Used by: consumer (inside hub cluster), Kafka's own controller quorum.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  namespace: monitoring
+spec:
+  clusterIP: None   # headless — no single IP, DNS resolves to pod IPs directly
+  selector:
+    app: kafka
+  ports:
+    - name: plaintext
+      port: 9092
+    - name: controller
+      port: 9093
+
+---
+# NodePort service — exposes Kafka's EXTERNAL listener to agent pods on other clusters.
+# Agents connect to: <node-ip>:30094
+# Works on bare-metal clusters without a cloud LoadBalancer provisioner.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-external
+  namespace: monitoring
+spec:
+  type: NodePort
+  selector:
+    app: kafka
+  ports:
+    - name: external
+      port: 9094
+      targetPort: 9094
+      nodePort: 30094

@@ -1,0 +1,14 @@
+# ClusterIP — InfluxDB is internal only.
+# Consumer and API reach it via: http://influxdb.monitoring.svc.cluster.local:8086
+apiVersion: v1
+kind: Service
+metadata:
+  name: influxdb
+  namespace: monitoring
+spec:
+  type: ClusterIP
+  selector:
+    app: influxdb
+  ports:
+    - port: 8086
+      targetPort: 8086

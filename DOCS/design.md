@@ -356,32 +356,71 @@ rules:
 
 No kubeconfig file. No `~/.kube/` copying. No VPN.
 
-### Hub cluster — what runs there
+### Hub cluster — sql107
 
-Deployed once on sql107 (or whichever cluster is designated the hub):
-
-```
-k8s/hub/
-├── kafka/          — StatefulSet (3 brokers) + LoadBalancer Service
-├── influxdb/       — StatefulSet + PersistentVolumeClaim
-├── consumer/       — Deployment
-├── api/            — Deployment + Service
-└── grafana/        — Deployment + Service
-```
-
-### Agent cluster — what runs on each cluster
-
-Deployed on every cluster being monitored (sql97, sql107, sql108, sql109, sql120):
+sql107 is both the hub (runs the central stack) and a monitored cluster (runs an agent pod).
+No separate machine is needed — one cluster plays both roles.
 
 ```
-k8s/agent/
-├── serviceaccount.yaml   — ServiceAccount + ClusterRole + ClusterRoleBinding
-└── deployment.yaml       — agent Deployment
-      env:
-        KAFKA_BROKERS: <LoadBalancer-IP>:9092   ← same for all clusters
-        SCRAPE_INTERVAL_SECONDS: 15
-      # no KUBECONFIG — uses in-cluster auth automatically
+sql107:
+  hub stack:  Kafka + InfluxDB + consumer + API + Grafana
+  agent pod:  scrapes sql107's own nodes → pushes to local Kafka
 ```
+
+Why sql107 and not Rancher Desktop?
+- Rancher Desktop is on a laptop — not always on, no real LoadBalancer support
+- sql107 is always running, cloud LoadBalancers work properly there
+
+### Deployment order
+
+```
+# 1. On sql107 — deploy Kafka service first to get the LoadBalancer IP
+kubectl apply -f k8s/hub/kafka/service.yaml
+kubectl get svc kafka-external -n monitoring --watch   # wait for EXTERNAL-IP
+
+# 2. Fill in the real IP in ONE place, then deploy the rest of the hub
+#    Edit k8s/hub/kafka/statefulset.yaml: replace REPLACE_KAFKA_LB_IP
+#    Edit k8s/agent/deployment.yaml:      replace REPLACE_ME (KAFKA_BROKERS)
+kubectl apply -f k8s/hub/kafka/statefulset.yaml
+kubectl apply -f k8s/hub/influxdb/
+kubectl apply -f k8s/hub/consumer/
+kubectl apply -f k8s/hub/api/
+kubectl apply -f k8s/hub/grafana/
+
+# 3. Deploy agent on sql107 itself (CLUSTER_NAME=sql107)
+kubectl apply -f k8s/agent/
+
+# 4. On each other cluster — deploy agent only
+#    Set CLUSTER_NAME=sqlXXX in deployment.yaml per cluster
+#    KAFKA_BROKERS is the same LB IP for all clusters
+kubectl apply -f k8s/agent/
+```
+
+### What each cluster runs
+
+```
+sql107 (hub + monitored):
+  k8s/hub/kafka/       — StatefulSet + LoadBalancer Service (external) + headless Service (internal)
+  k8s/hub/influxdb/    — StatefulSet + PVC
+  k8s/hub/consumer/    — Deployment
+  k8s/hub/api/         — Deployment + LoadBalancer Service
+  k8s/hub/grafana/     — Deployment + ConfigMap + LoadBalancer Service
+  k8s/agent/           — agent pod, CLUSTER_NAME=sql107
+
+sql97, sql108, sql109, sql120 (monitored only):
+  k8s/agent/           — agent pod, CLUSTER_NAME=sqlXXX, KAFKA_BROKERS=<LB-IP>:9094
+```
+
+### The Kafka listener chicken-and-egg
+
+Kafka's `ADVERTISED_LISTENERS` must contain the LoadBalancer IP at startup, but the IP
+only exists after the Service is created. The sequence handles this:
+
+1. Create the Service first → IP gets assigned by the cloud provider
+2. Fill the IP into `statefulset.yaml` → deploy Kafka with the correct address
+3. Agents point to the same IP
+
+This is a one-time setup step. Once deployed, the IP is stable.
 
 ### File structure
 
@@ -413,11 +452,14 @@ k8s/
 
 ## Key Cluster Targets
 
-| Cluster         | Type         | World 1 role                    | World 2 role                        |
-|-----------------|--------------|---------------------------------|-------------------------------------|
-| Rancher Desktop | Local k8s    | Dev + smoke test                | Dev only (no LoadBalancer support)  |
-| sql107          | Remote k8s   | Metrics source (via VPN)        | Hub cluster — runs central stack    |
-| sql97, sql108, sql109, sql120 | Remote k8s | Metrics source (via VPN) | Agent-only clusters             |
+| Cluster         | Type         | World 1 role                    | World 2 role                               |
+|-----------------|--------------|---------------------------------|--------------------------------------------|
+| Rancher Desktop | Local k8s    | Dev + smoke test                | Dev only — no LoadBalancer, not always on  |
+| sql107          | Remote k8s   | Metrics source (via VPN)        | Hub + monitored — central stack + agent    |
+| sql97           | Remote k8s   | Metrics source (via VPN)        | Monitored only — agent pod                 |
+| sql108          | Remote k8s   | Metrics source (via VPN)        | Monitored only — agent pod                 |
+| sql109          | Remote k8s   | Metrics source (via VPN)        | Monitored only — agent pod                 |
+| sql120          | Remote k8s   | Metrics source (via VPN)        | Monitored only — agent pod                 |
 
 ---
 
