@@ -269,4 +269,4 @@ docker-compose up --build
 - [x] 1-hour tumbling window aggregation working and flushing to InfluxDB
 - [x] REST API: query metrics by VM + time range
 - [x] `docker-compose up` brings up full stack
-- [ ] Grafana dashboard shows per-VM time-series
+- [x] Grafana dashboard shows per-VM time-series

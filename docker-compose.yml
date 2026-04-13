@@ -62,10 +62,11 @@ services:
       KAFKA_TOPIC: vm-metrics-ts
       SCRAPE_INTERVAL_SECONDS: 15
       SCRAPE_TIMEOUT_SECONDS: 10   # per-context timeout; prevents slow clusters blocking others
-      KUBECONFIG: /root/.kube/config
+      # Colon-separated kubeconfig files (standard kubectl convention)
+      KUBECONFIG: /root/.kube/config:/root/.kube/sql107.yaml:/root/.kube/sql108.yaml
       # Comma-separated kubeconfig contexts to scrape.
       # Leave empty to scrape ALL contexts.
-      KUBE_CONTEXTS: "rancher-desktop"
+      KUBE_CONTEXTS: "rancher-desktop,sql107,sql108"
     volumes:
       - ~/.kube:/root/.kube:ro   # mount your local kubeconfig read-only
     restart: on-failure
