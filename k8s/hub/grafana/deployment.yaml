@@ -15,7 +15,8 @@ spec:
     spec:
       containers:
         - name: grafana
-          image: grafana/grafana:10.4.0
+          image: ghcr.io/siqiliu18/grafana:10.4.0
+          imagePullPolicy: Always
           ports:
             - containerPort: 3000
           env:

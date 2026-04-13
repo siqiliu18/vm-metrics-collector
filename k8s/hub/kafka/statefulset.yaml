@@ -33,9 +33,21 @@ spec:
       labels:
         app: kafka
     spec:
+      # initContainer runs as root to fix NFS permissions before Kafka starts.
+      # Confluent's entrypoint switches to appuser (uid=1000) internally,
+      # so runAsUser:0 on the main container doesn't help — chown is needed.
+      initContainers:
+        - name: fix-permissions
+          image: ghcr.io/siqiliu18/vm-metrics-agent:latest   # alpine-based, on ghcr.io not Docker Hub
+          command: ["sh", "-c", "chown -R 1000:1000 /var/lib/kafka/data"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/lib/kafka/data
       containers:
         - name: kafka
-          image: confluentinc/cp-kafka:7.6.0
+          image: ghcr.io/siqiliu18/cp-kafka:7.6.0
           ports:
             - containerPort: 9092   # PLAINTEXT — internal
             - containerPort: 9093   # CONTROLLER — KRaft
@@ -73,6 +85,7 @@ spec:
             exec:
               command: ["kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
             initialDelaySeconds: 20
+            timeoutSeconds: 10
             periodSeconds: 10
             failureThreshold: 6
           resources:

@@ -261,6 +261,164 @@ docker-compose up --build
 
 ---
 
+---
+
+## World 2 — Kubernetes Deployment [DONE]
+
+### Why World 2?
+
+World 1 (docker-compose) ran the agent on your Mac. To monitor remote IBM Fyre clusters
+it needed a VPN connection inside the container — impractical. World 2 deploys one agent
+**pod inside each cluster**, using in-cluster auth. No VPN, no kubeconfig file distribution.
+
+---
+
+### The Image Registry Story
+
+Kubernetes pulls images from a registry at deploy time. Three choices exist:
+- **Docker Hub** — default, but anonymous pulls are rate-limited to ~10/6 hours per IP.
+  On a shared IBM Fyre cluster this limit hits fast and causes `ImagePullBackOff`.
+- **Private registry** — requires `kubectl create secret` on every cluster. Cumbersome.
+- **GitHub Container Registry (ghcr.io)** — free, no rate limits for public packages,
+  and packages can be made public so no pull secret is needed anywhere.
+
+**Decision: push all images to `ghcr.io/siqiliu18/` and make them public.**
+
+There are two categories of images:
+
+**Custom images** (built from this repo's Dockerfiles):
+- `ghcr.io/siqiliu18/vm-metrics-agent:latest`
+- `ghcr.io/siqiliu18/vm-metrics-consumer:latest`
+- `ghcr.io/siqiliu18/vm-metrics-api:latest`
+
+These are built automatically by GitHub Actions (`.github/workflows/build.yml`) on every
+push to `main` that touches `cmd/**` or `internal/**`. The Actions runner is `ubuntu-latest`
+(linux/amd64), so the images are always built for the right architecture.
+
+**Third-party images** (mirrored to avoid Docker Hub rate limits):
+- `ghcr.io/siqiliu18/cp-kafka:7.6.0` (mirrored from `confluentinc/cp-kafka:7.6.0`)
+- `ghcr.io/siqiliu18/influxdb:2.7` (mirrored from `influxdb:2.7`)
+- `ghcr.io/siqiliu18/grafana:10.4.0` (mirrored from `grafana/grafana:10.4.0`)
+
+Mirroring is a manual one-time step per version:
+```bash
+docker pull --platform linux/amd64 influxdb:2.7
+docker tag influxdb:2.7 ghcr.io/siqiliu18/influxdb:2.7
+docker push ghcr.io/siqiliu18/influxdb:2.7
+```
+The `--platform linux/amd64` flag is critical — without it, Docker on an Apple Silicon Mac
+pulls the arm64 variant, which causes `exec format error` on amd64 cluster nodes.
+
+**How to make a ghcr.io package public:**
+GitHub → your profile → Packages → select package → Package settings →
+Change visibility → Public. Must be done once per package after first push.
+
+**GitHub Actions write permissions:**
+For GitHub Actions to push to an existing package, the repo must have write access:
+Package settings → Manage Actions access → Add repository → Write role.
+(New packages created by Actions get this automatically; packages first pushed manually need it set explicitly.)
+
+---
+
+### Architecture on the Hub Cluster
+
+The hub cluster (sgn3) runs the full stack:
+
+```
+[agent pod] ──→ Kafka (PLAINTEXT:9092) ──→ [consumer pod] ──→ InfluxDB
+                Kafka (EXTERNAL:9094)  ←── agent pods on other clusters
+                     ↑ NodePort 30094
+[api pod] ──→ InfluxDB     (NodePort 30080)
+[grafana pod] ──→ InfluxDB (NodePort 30300)
+```
+
+**Why Kafka has two listeners:**
+Kafka tells connecting clients "reconnect to my advertised address". Internal clients
+(consumer pod, hub agent) use `kafka-0.kafka-headless.monitoring.svc.cluster.local:9092`
+(the headless service DNS, only resolvable inside the cluster). External clients (agent pods
+on other clusters) can't resolve that DNS, so they use the NodePort address
+(`9.60.158.240:30094`) via the EXTERNAL listener. A single listener would advertise one
+address that only works for one side.
+
+**Why the hub agent uses a different address than external agents:**
+The hub agent pod is inside the same cluster as Kafka. Connecting via NodePort
+(pod → node IP → NodePort) requires hairpin NAT, which bare-metal clusters often don't
+support. So the hub agent connects via the internal PLAINTEXT listener (port 9092)
+while external cluster agents connect via NodePort 30094.
+
+---
+
+### NFS and the initContainer
+
+IBM Fyre clusters use NFS for persistent storage. NFS is often configured with `root_squash`,
+which remaps root (uid=0) inside the container to `nobody` (uid=65534) on the NFS server.
+
+Confluent Kafka's entrypoint internally switches to `appuser` (uid=1000) regardless of the
+container's `runAsUser` setting. If the NFS directory is not owned by uid=1000, Kafka
+cannot write its data and crashes.
+
+The fix: an `initContainer` runs first as root, does `chown -R 1000:1000 /var/lib/kafka/data`,
+then exits. The main Kafka container starts after this succeeds and can write freely.
+
+The initContainer uses `ghcr.io/siqiliu18/vm-metrics-agent:latest` (an alpine-based image
+already on ghcr.io) to avoid pulling yet another Docker Hub image.
+
+On non-NFS clusters (EKS, GKE, AKS), `securityContext.fsGroup: 1000` on the pod spec
+is the cleaner solution — Kubernetes handles the ownership change automatically.
+
+---
+
+### Kafka's ADVERTISED_LISTENERS Chicken-and-Egg
+
+The StatefulSet env var `KAFKA_ADVERTISED_LISTENERS` must contain the node's actual IP
+so external agents can reach it. But the IP is only known after the cluster exists.
+
+Solution in `deploy.sh`:
+1. Apply `k8s/hub/kafka/service.yaml` first (creates the NodePort service)
+2. Query the node IP: `kubectl get nodes -o jsonpath=...`
+3. Use `sed` to substitute `REPLACE_KAFKA_LB_IP` with the real IP before applying the StatefulSet
+
+**Important:** always apply the Kafka StatefulSet through `deploy.sh`, never with
+`kubectl apply -f k8s/hub/kafka/statefulset.yaml` directly — that applies the file with
+the literal placeholder, breaking ADVERTISED_LISTENERS.
+
+---
+
+### deploy.sh Design
+
+```
+./deploy.sh hub [kubeconfig]              # deploy full hub stack
+./deploy.sh agent <hub-kc> <agent-kc>... # deploy agent on one or more clusters
+./deploy.sh undeploy hub [kubeconfig]    # tear down hub stack
+./deploy.sh undeploy agent <kc>...       # remove agent from clusters
+```
+
+- Kubeconfig argument is optional if `$KUBECONFIG` is already exported in the shell
+- Hub deploy/undeploy shows a confirmation prompt (kubeconfig path + node IP) before acting
+- `derive_cluster_name`: uses the kubeconfig **filename** if it's descriptive (e.g. `sgn3.yaml` → `sgn3`),
+  falls back to parent directory name (e.g. `sgn3/kubeconfig.yaml` → `sgn3`)
+- `deploy agents`: takes hub kubeconfig as first arg, queries Kafka IP directly from the
+  hub cluster — no local state files
+
+---
+
+### Issues Hit During Deployment and Their Fixes
+
+| Issue | Root Cause | Fix |
+|---|---|---|
+| `ImagePullBackOff` on all pods | Docker Hub anonymous rate limit | Mirror all images to ghcr.io |
+| `exec format error` on cluster | Images built on Mac (arm64), cluster is amd64 | `docker pull --platform linux/amd64` for third-party; GitHub Actions builds custom images |
+| `exec format error` after re-push | Pinned tag (`:10.4.0`) → `IfNotPresent` pull policy — node used cached arm64 | Add `imagePullPolicy: Always` to grafana deployment |
+| Kafka `/var/lib/kafka/data` not writable | NFS root_squash + Confluent forces uid=1000 | initContainer does `chown -R 1000:1000` before Kafka starts |
+| `REPLACE_KAFKA_LB_IP` literal in Kafka | Applied StatefulSet directly without `sed` substitution | Always deploy Kafka via `deploy.sh` which runs `sed` |
+| Kafka readiness probe timing out | Default timeout was 1s, too short for Kafka startup | Added `timeoutSeconds: 10` to readiness probe |
+| Consumer: `no such host kafka-0.kafka-headless...` | Kafka pod not Ready → headless DNS has no endpoint | Fixed Kafka first; DNS entry appears only when pod is Ready |
+| Hub agent: `connection refused` on port 9094 | Pod→nodeIP→NodePort (hairpin NAT) not supported on bare-metal | Hub agent uses internal PLAINTEXT listener (port 9092) instead |
+| GitHub Actions `permission_denied` pushing image | Package existed but repo didn't have write access | Package settings → Manage Actions access → Add repo with Write role |
+| `kubectl get nodes -o jsonpath` returns empty | Fish shell or kubectl version issue with complex jsonpath filters | Hardcode the known IP or use `kubectl get nodes -o wide` |
+
+---
+
 ## Definition of Done (from design.md)
 
 - [x] Go agent collects CPU/mem from k8s nodes via kubeconfig

@@ -14,9 +14,18 @@ spec:
       labels:
         app: influxdb
     spec:
+      initContainers:
+        - name: fix-permissions
+          image: ghcr.io/siqiliu18/vm-metrics-agent:latest   # alpine-based, on ghcr.io not Docker Hub
+          command: ["sh", "-c", "chown -R 1000:1000 /var/lib/influxdb2"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: influxdb-data
+              mountPath: /var/lib/influxdb2
       containers:
         - name: influxdb
-          image: influxdb:2.7
+          image: ghcr.io/siqiliu18/influxdb:2.7
           ports:
             - containerPort: 8086
           env:

@@ -2,19 +2,22 @@
 # deploy.sh — World 2 deployment CLI
 #
 # Usage:
-#   ./deploy.sh hub   <kubeconfig> [cluster-name]
-#   ./deploy.sh agent <kubeconfig>... [--name name1,name2,...]
+#   ./deploy.sh hub      <hub-kubeconfig> [cluster-name]              deploy central stack
+#   ./deploy.sh agent    <hub-kubeconfig> <agent-kubeconfig>...       deploy agent on one or more clusters
+#   ./deploy.sh undeploy hub   <hub-kubeconfig>                       tear down hub stack
+#   ./deploy.sh undeploy agent <agent-kubeconfig>...                  remove agent from clusters
 #
 # Examples:
-#   ./deploy.sh hub ~/Downloads/sgn3/kubeconfig.yaml
-#   ./deploy.sh hub ~/Downloads/sgn3/kubeconfig.yaml sgn3
+#   ./deploy.sh hub   ~/Downloads/sgn3/kubeconfig.yaml
+#   ./deploy.sh agent ~/Downloads/sgn3/kubeconfig.yaml \
+#                     ~/Downloads/sql97/kubeconfig.yaml \
+#                     ~/Downloads/sql108/kubeconfig.yaml
 #
-#   ./deploy.sh agent ~/Downloads/sql97/kubeconfig.yaml
-#   ./deploy.sh agent ~/Downloads/sql97/kubeconfig.yaml ~/Downloads/sql108/kubeconfig.yaml
+#   ./deploy.sh undeploy hub   ~/Downloads/sgn3/kubeconfig.yaml
+#   ./deploy.sh undeploy agent ~/Downloads/sql97/kubeconfig.yaml ~/Downloads/sql108/kubeconfig.yaml
 #
-# cluster-name: used as vm_id tag in InfluxDB.
-#   Defaults to the parent directory name of the kubeconfig file.
-#   e.g. ~/Downloads/sql108/kubeconfig.yaml → sql108
+# cluster-name defaults to the parent directory of the kubeconfig file:
+#   ~/Downloads/sql108/kubeconfig.yaml → sql108
 #
 # Requirements: kubectl
 
@@ -34,6 +37,19 @@ usage() {
 log() { echo "[deploy] $*"; }
 die() { echo "[error]  $*" >&2; exit 1; }
 
+confirm_hub() {
+  local action="$1"   # "deploy" or "undeploy"
+  local node_ip="$2"
+  echo ""
+  echo "  action    : $action hub"
+  echo "  kubeconfig: $KUBECONFIG"
+  echo "  node IP   : $node_ip"
+  echo ""
+  printf "Proceed? [y/N] "
+  read -r answer
+  [[ "$answer" =~ ^[Yy]$ ]] || die "aborted"
+}
+
 require() {
   for cmd in "$@"; do
     command -v "$cmd" &>/dev/null || die "'$cmd' is required but not installed"
@@ -42,8 +58,16 @@ require() {
 
 resolve_path() { eval echo "$1"; }
 
-# Set KUBECONFIG to a single file and verify the cluster is reachable
+# Set KUBECONFIG to a single file and verify the cluster is reachable.
+# If no path is given, falls back to the already-exported $KUBECONFIG.
 use_kubeconfig() {
+  if [[ -z "${1:-}" ]]; then
+    [[ -n "${KUBECONFIG:-}" ]] || die "no kubeconfig provided and \$KUBECONFIG is not set"
+    kubectl cluster-info --request-timeout=5s >/dev/null \
+      || die "cannot reach cluster at $KUBECONFIG"
+    log "connected to cluster via \$KUBECONFIG ($KUBECONFIG)"
+    return
+  fi
   local kubeconfig
   kubeconfig=$(resolve_path "$1")
   [[ -f "$kubeconfig" ]] || die "kubeconfig not found: $kubeconfig"
@@ -53,11 +77,23 @@ use_kubeconfig() {
   log "connected to cluster via $kubeconfig"
 }
 
-# Derive cluster name from kubeconfig path: ~/Downloads/sql108/kubeconfig.yaml → sql108
+# Derive cluster name from kubeconfig path.
+# 1. Use filename if it's not a generic name (e.g. sgn3.yaml → sgn3, sql108.yaml → sql108)
+# 2. Fall back to parent directory name (e.g. Downloads/sql108/kubeconfig.yaml → sql108)
 derive_cluster_name() {
   local kubeconfig
   kubeconfig=$(resolve_path "$1")
-  basename "$(dirname "$kubeconfig")"
+  local filename
+  filename=$(basename "$kubeconfig" .yaml)
+  # Generic filenames that don't identify a cluster
+  case "$filename" in
+    kubeconfig|config|kube-config|kubeconfig_*)
+      basename "$(dirname "$kubeconfig")"
+      ;;
+    *)
+      echo "$filename"
+      ;;
+  esac
 }
 
 # Get node IP for NodePort access (ExternalIP preferred, falls back to InternalIP)
@@ -75,10 +111,16 @@ get_node_ip() {
 # ─── hub ──────────────────────────────────────────────────────────────────────
 
 deploy_hub() {
-  local kubeconfig="$1"
-  local cluster_name="${2:-$(derive_cluster_name "$kubeconfig")}"
+  local kubeconfig="${1:-}"
+  local cluster_name="${2:-$(derive_cluster_name "${kubeconfig:-$KUBECONFIG}")}"
 
   use_kubeconfig "$kubeconfig"
+
+  local node_ip
+  node_ip=$(get_node_ip)
+  [[ -z "$node_ip" ]] && die "could not determine node IP"
+
+  confirm_hub "deploy" "$node_ip"
   log "=== deploying hub (cluster-name=$cluster_name) ==="
 
   kubectl apply -f - <<EOF
@@ -88,9 +130,6 @@ metadata:
   name: $NAMESPACE
 EOF
 
-  local node_ip
-  node_ip=$(get_node_ip)
-  [[ -z "$node_ip" ]] && die "could not determine node IP"
   log "node IP: $node_ip"
 
   log "deploying Kafka..."
@@ -113,10 +152,9 @@ EOF
   kubectl apply -f k8s/hub/grafana/
 
   log "deploying agent on hub cluster..."
-  _apply_agent "$cluster_name" "$node_ip"
-
-  # Save node IP so subsequent 'deploy.sh agent' calls can find it
-  echo "$node_ip" > .kafka-node-ip
+  # Hub agent is co-located with Kafka — use internal PLAINTEXT listener (port 9092).
+  # External NodePort (9094→30094) requires hairpin NAT which bare-metal clusters often lack.
+  _apply_agent "$cluster_name" "kafka-0.kafka-headless.monitoring.svc.cluster.local" "9092"
 
   log ""
   log "=== hub ready ==="
@@ -124,22 +162,27 @@ EOF
   log "API:                http://$node_ip:30080"
   log "Grafana:            http://$node_ip:30300  (admin / admin)"
   log ""
-  log "Next: ./deploy.sh agent <kubeconfig>..."
+  log "Next: ./deploy.sh agent $kubeconfig <agent-kubeconfig>..."
 }
 
 # ─── agent ────────────────────────────────────────────────────────────────────
 
 deploy_agents() {
-  [[ -f .kafka-node-ip ]] \
-    || die ".kafka-node-ip not found — run './deploy.sh hub' first"
+  local hub_kubeconfig="$1"
+  shift
+
+  # Query the node IP directly from the hub cluster — no local file dependency
+  use_kubeconfig "$hub_kubeconfig"
   local kafka_ip
-  kafka_ip=$(cat .kafka-node-ip)
+  kafka_ip=$(get_node_ip)
+  [[ -z "$kafka_ip" ]] && die "could not determine hub node IP from $hub_kubeconfig"
+  log "hub node IP (Kafka): $kafka_ip:$KAFKA_EXTERNAL_PORT"
 
   for kubeconfig in "$@"; do
     local cluster_name
     cluster_name=$(derive_cluster_name "$kubeconfig")
     use_kubeconfig "$kubeconfig"
-    log "=== deploying agent (cluster-name=$cluster_name, kafka=$kafka_ip:$KAFKA_EXTERNAL_PORT) ==="
+    log "=== deploying agent (cluster-name=$cluster_name) ==="
     _apply_agent "$cluster_name" "$kafka_ip"
     log "agent deployed on $cluster_name"
   done
@@ -148,15 +191,52 @@ deploy_agents() {
 _apply_agent() {
   local cluster_name="$1"
   local kafka_ip="$2"
+  local kafka_port="${3:-9094}"   # default 9094 (EXTERNAL); hub agent passes 9092 (PLAINTEXT)
 
   kubectl apply -f k8s/agent/serviceaccount.yaml
 
   sed \
     -e "s/REPLACE_CLUSTER_NAME/$cluster_name/g" \
-    -e "s/REPLACE_KAFKA_IP/$kafka_ip/g" \
+    -e "s/REPLACE_KAFKA_IP:9094/$kafka_ip:$kafka_port/g" \
     -e "s|REGISTRY/|${REGISTRY}/|g" \
     k8s/agent/deployment.yaml \
     | kubectl apply -f -
+}
+
+# ─── undeploy ─────────────────────────────────────────────────────────────────
+
+undeploy_hub() {
+  local kubeconfig="${1:-}"
+  use_kubeconfig "$kubeconfig"
+
+  local node_ip
+  node_ip=$(get_node_ip)
+
+  confirm_hub "undeploy" "$node_ip"
+  log "=== removing hub stack ==="
+
+  # Deleting the namespace removes all namespaced resources in one shot
+  # (Kafka, InfluxDB, consumer, API, Grafana, agent)
+  kubectl delete namespace "$NAMESPACE" --ignore-not-found
+
+  # ClusterRole and ClusterRoleBinding are cluster-scoped — not deleted with namespace
+  kubectl delete clusterrole    vm-metrics-agent --ignore-not-found
+  kubectl delete clusterrolebinding vm-metrics-agent --ignore-not-found
+
+  log "hub stack removed"
+}
+
+undeploy_agents() {
+  for kubeconfig in "$@"; do
+    use_kubeconfig "$kubeconfig"
+    local cluster_name
+    cluster_name=$(derive_cluster_name "$kubeconfig")
+    log "=== removing agent from $cluster_name ==="
+    kubectl delete namespace "$NAMESPACE" --ignore-not-found
+    kubectl delete clusterrole    vm-metrics-agent --ignore-not-found
+    kubectl delete clusterrolebinding vm-metrics-agent --ignore-not-found
+    log "agent removed from $cluster_name"
+  done
 }
 
 # ─── entrypoint ───────────────────────────────────────────────────────────────
@@ -165,13 +245,27 @@ require kubectl
 
 case "${1:-}" in
   hub)
-    [[ $# -ge 2 ]] || usage
-    deploy_hub "$2" "${3:-}"
+    deploy_hub "${2:-}" "${3:-}"   # kubeconfig optional — falls back to $KUBECONFIG
     ;;
   agent)
-    [[ $# -ge 2 ]] || usage
+    [[ $# -ge 3 ]] || usage
     shift
     deploy_agents "$@"
+    ;;
+  undeploy)
+    case "${2:-}" in
+      hub)
+        undeploy_hub "${3:-}"   # kubeconfig optional — falls back to $KUBECONFIG
+        ;;
+      agent)
+        [[ $# -ge 3 ]] || usage
+        shift 2
+        undeploy_agents "$@"
+        ;;
+      *)
+        usage
+        ;;
+    esac
     ;;
   *)
     usage
