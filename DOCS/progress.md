@@ -414,6 +414,8 @@ the literal placeholder, breaking ADVERTISED_LISTENERS.
 | Kafka readiness probe timing out | Default timeout was 1s, too short for Kafka startup | Added `timeoutSeconds: 10` to readiness probe |
 | Consumer: `no such host kafka-0.kafka-headless...` | Kafka pod not Ready → headless DNS has no endpoint | Fixed Kafka first; DNS entry appears only when pod is Ready |
 | Hub agent: `connection refused` on port 9094 | Pod→nodeIP→NodePort (hairpin NAT) not supported on bare-metal | Hub agent uses internal PLAINTEXT listener (port 9092) instead |
+| External agents: `connection refused` on port 9094 even with correct KAFKA_BROKERS=ip:30094 | Kafka metadata redirect — client bootstraps on 30094 but Kafka advertises `EXTERNAL://ip:9094` in metadata; client then dials 9094 which is refused | `KAFKA_ADVERTISED_LISTENERS` must use the NodePort (`EXTERNAL://ip:30094`), not the pod port (9094) |
+| Consumer: `no such host kafka-0.kafka-headless...` after kafka-0 bounce | Consumer's Kafka client cached the DNS failure from when the pod was down; doesn't self-heal | `kubectl rollout restart deployment/consumer` after kafka-0 is Ready again |
 | GitHub Actions `permission_denied` pushing image | Package existed but repo didn't have write access | Package settings → Manage Actions access → Add repo with Write role |
 | `kubectl get nodes -o jsonpath` returns empty | Fish shell or kubectl version issue with complex jsonpath filters | Hardcode the known IP or use `kubectl get nodes -o wide` |
 
