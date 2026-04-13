@@ -279,39 +279,145 @@ Kafka's consumer group protocol auto-rebalances partitions across consumer insta
 
 ## World 1 vs World 2
 
-| Aspect          | World 1 — docker-compose          | World 2 — Kubernetes + Skaffold (stretch)     |
+| Aspect          | World 1 — docker-compose          | World 2 — Kubernetes                          |
 |-----------------|-----------------------------------|-----------------------------------------------|
-| Start command   | `docker-compose up`               | `skaffold run`                                |
-| Agent auth      | `~/.kube/config` volume mount     | kubeconfig stored as k8s Secret               |
+| Start command   | `docker-compose up`               | `kubectl apply -f k8s/`                       |
+| Agent auth      | `~/.kube/config` volume mount     | In-cluster ServiceAccount token (automatic)   |
+| Agent placement | One agent on dev laptop           | One agent pod per target cluster              |
+| VPN requirement | Yes — agent runs on your Mac      | No — agent calls local in-cluster API         |
 | Kafka           | Single broker, KRaft mode         | StatefulSet (3 brokers), stable DNS identities|
+| Kafka access    | localhost port mapping            | LoadBalancer Service (external IP)            |
 | InfluxDB        | Single container                  | StatefulSet + PersistentVolumeClaim           |
 | Scalability     | `--scale` for stateless services  | HPA on Deployments                            |
-| Use case        | Local dev, demos, Week 1–2        | Production-like, multi-cluster, Week 3–4      |
+| Use case        | Local dev, smoke test             | Production-like, true multi-cluster demo      |
 
-k8s manifests will live under `k8s/` (World 2, not yet implemented):
+---
+
+## World 2 — Architecture
+
+### The key insight: one agent per cluster, one central stack
+
+In World 1, one agent on your Mac scrapes all clusters via kubeconfig — requiring VPN
+for remote clusters. In World 2, each cluster runs its own agent pod that calls the
+**local in-cluster API server** — no VPN, no kubeconfig files, no external auth needed.
+
+All agents push outward to one central Kafka, exposed via a LoadBalancer Service.
+The rest of the stack (consumer, InfluxDB, Grafana, API) is deployed once on a
+designated "hub" cluster.
+
+```
+sql97  → agent pod ──────────────────────────────────┐
+sql107 → agent pod (also runs hub stack) ────────────┤──→ Kafka LoadBalancer
+sql108 → agent pod ──────────────────────────────────┤       ↓
+sql109 → agent pod ──────────────────────────────────┤    consumer
+sql120 → agent pod ──────────────────────────────────┘       ↓
+                                                          InfluxDB
+                                                          API + Grafana
+```
+
+**Adding a new cluster = deploy one agent Deployment.** Zero changes to the hub.
+
+### Why LoadBalancer for Kafka (not VPN, not in-cluster-only)
+
+| Option | Problem |
+|---|---|
+| Kafka inside one cluster only | Other 4 clusters still need to reach it — same problem |
+| VPN between clusters | Complex to automate, brittle, not cloud-native |
+| LoadBalancer Service | External IP assigned by cloud provider; all agents push to one stable endpoint |
+
+Kafka is the **only** component that needs external exposure. Everything else
+(consumer, InfluxDB, Grafana, API) is internal to the hub cluster.
+
+### In-cluster agent auth
+
+World 1 agent reads a kubeconfig file. World 2 agent uses **in-cluster config** —
+Kubernetes automatically mounts a ServiceAccount token into every pod:
+
+```go
+// World 1 — reads ~/.kube/config
+config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+
+// World 2 — reads ServiceAccount token at /var/run/secrets/kubernetes.io/serviceaccount/
+config, err := rest.InClusterConfig()
+```
+
+The agent needs a ServiceAccount with permission to read node metrics:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-metrics-reader
+rules:
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+```
+
+No kubeconfig file. No `~/.kube/` copying. No VPN.
+
+### Hub cluster — what runs there
+
+Deployed once on sql107 (or whichever cluster is designated the hub):
+
+```
+k8s/hub/
+├── kafka/          — StatefulSet (3 brokers) + LoadBalancer Service
+├── influxdb/       — StatefulSet + PersistentVolumeClaim
+├── consumer/       — Deployment
+├── api/            — Deployment + Service
+└── grafana/        — Deployment + Service
+```
+
+### Agent cluster — what runs on each cluster
+
+Deployed on every cluster being monitored (sql97, sql107, sql108, sql109, sql120):
+
+```
+k8s/agent/
+├── serviceaccount.yaml   — ServiceAccount + ClusterRole + ClusterRoleBinding
+└── deployment.yaml       — agent Deployment
+      env:
+        KAFKA_BROKERS: <LoadBalancer-IP>:9092   ← same for all clusters
+        SCRAPE_INTERVAL_SECONDS: 15
+      # no KUBECONFIG — uses in-cluster auth automatically
+```
+
+### File structure
 
 ```
 k8s/
-├── kafka/
-├── influxdb/
-├── agent/
-├── consumer/
-├── api/
-└── grafana/
-skaffold.yaml
+├── hub/
+│   ├── kafka/
+│   │   ├── statefulset.yaml
+│   │   └── service.yaml        ← LoadBalancer type
+│   ├── influxdb/
+│   │   ├── statefulset.yaml
+│   │   ├── pvc.yaml
+│   │   └── service.yaml
+│   ├── consumer/
+│   │   └── deployment.yaml
+│   ├── api/
+│   │   ├── deployment.yaml
+│   │   └── service.yaml
+│   └── grafana/
+│       ├── deployment.yaml
+│       ├── service.yaml
+│       └── configmap.yaml      ← provisioning files (replaces bind mount)
+└── agent/
+    ├── serviceaccount.yaml
+    └── deployment.yaml
 ```
 
 ---
 
-## Key Cluster Targets (World 1 agent)
+## Key Cluster Targets
 
-| Cluster         | Type       | Use for                         |
-|-----------------|------------|---------------------------------|
-| Rancher Desktop | Local k8s  | Dev + smoke test (start here)   |
-| 5× k8s clusters | Remote     | Integration testing, multi-cluster demo |
-| 2× OpenShift    | Remote     | OpenShift compat validation     |
-
-Set `KUBE_CONTEXTS` env var to a comma-separated list of kubeconfig context names to scrape multiple clusters simultaneously.
+| Cluster         | Type         | World 1 role                    | World 2 role                        |
+|-----------------|--------------|---------------------------------|-------------------------------------|
+| Rancher Desktop | Local k8s    | Dev + smoke test                | Dev only (no LoadBalancer support)  |
+| sql107          | Remote k8s   | Metrics source (via VPN)        | Hub cluster — runs central stack    |
+| sql97, sql108, sql109, sql120 | Remote k8s | Metrics source (via VPN) | Agent-only clusters             |
 
 ---
 
@@ -351,11 +457,25 @@ docker-compose down -v
 
 ## Definition of Done (World 1)
 
-- [ ] Go agent collects CPU/mem/disk from k8s nodes via kubeconfig
-- [ ] Agent produces to Kafka with `vm_id` as partition key
-- [ ] Consumer reads from Kafka and writes raw metrics to InfluxDB
-- [ ] 1-hour tumbling window aggregation working and flushing to InfluxDB
-- [ ] REST API: query metrics by VM + time range
-- [ ] `docker-compose up` brings up full stack (Kafka + InfluxDB + agent + consumer + API + Grafana)
-- [ ] Demo: 3 agents scraping Rancher Desktop, metrics queryable, 1-hour summary visible
-- [ ] Grafana dashboard shows per-VM time-series
+- [x] Go agent collects CPU/mem from k8s nodes via kubeconfig
+- [x] Agent produces to Kafka with `vm_id` as partition key
+- [x] Consumer reads from Kafka and writes raw metrics to InfluxDB
+- [x] 1-hour tumbling window aggregation working and flushing to InfluxDB
+- [x] REST API: query metrics by VM + time range
+- [x] `docker-compose up` brings up full stack (Kafka + InfluxDB + agent + consumer + API + Grafana)
+- [x] Grafana dashboard shows per-VM time-series
+
+---
+
+## Definition of Done (World 2)
+
+- [ ] Agent uses `rest.InClusterConfig()` instead of kubeconfig file
+- [ ] Agent Deployment + ServiceAccount + ClusterRole manifests (`k8s/agent/`)
+- [ ] Kafka StatefulSet (3 brokers) + LoadBalancer Service (`k8s/hub/kafka/`)
+- [ ] InfluxDB StatefulSet + PVC (`k8s/hub/influxdb/`)
+- [ ] Consumer Deployment (`k8s/hub/consumer/`)
+- [ ] API Deployment + Service (`k8s/hub/api/`)
+- [ ] Grafana Deployment + ConfigMap for provisioning (`k8s/hub/grafana/`)
+- [ ] Hub stack deployed on sql107, agent deployed on all 5 clusters
+- [ ] `curl <api-service-ip>/vms` returns nodes from all 5 clusters
+- [ ] Grafana dashboard shows metrics from all 5 clusters simultaneously
