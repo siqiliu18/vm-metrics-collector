@@ -63,7 +63,7 @@ spec:
               # PLAINTEXT advertises the stable headless DNS — resolvable inside the cluster
               # EXTERNAL advertises the LoadBalancer IP — resolvable from agent pods on other clusters
               # Replace KAFKA_LB_IP with the actual LoadBalancer IP after `kubectl get svc kafka-external`
-              value: "PLAINTEXT://kafka-0.kafka-headless.monitoring.svc.cluster.local:9092,EXTERNAL://REPLACE_KAFKA_LB_IP:9094"
+              value: "PLAINTEXT://kafka-0.kafka-headless.monitoring.svc.cluster.local:9092,EXTERNAL://REPLACE_KAFKA_LB_IP:30094"
             - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
               value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
             - name: KAFKA_CONTROLLER_QUORUM_VOTERS

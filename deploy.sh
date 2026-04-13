@@ -2,22 +2,24 @@
 # deploy.sh — World 2 deployment CLI
 #
 # Usage:
-#   ./deploy.sh hub      <hub-kubeconfig> [cluster-name]              deploy central stack
-#   ./deploy.sh agent    <hub-kubeconfig> <agent-kubeconfig>...       deploy agent on one or more clusters
-#   ./deploy.sh undeploy hub   <hub-kubeconfig>                       tear down hub stack
-#   ./deploy.sh undeploy agent <agent-kubeconfig>...                  remove agent from clusters
+#   ./deploy.sh hub    [hub-kubeconfig] [cluster-name]   deploy central stack
+#   ./deploy.sh agent  <agent-kubeconfig>...             deploy agent on one or more clusters
+#   ./deploy.sh undeploy hub   [hub-kubeconfig]          tear down hub stack
+#   ./deploy.sh undeploy agent <agent-kubeconfig>...     remove agent from clusters
+#
+# hub-kubeconfig is optional if $KUBECONFIG is already exported.
+# For 'agent', the hub cluster is resolved interactively (prompts if unclear).
 #
 # Examples:
 #   ./deploy.sh hub   ~/Downloads/sgn3/kubeconfig.yaml
-#   ./deploy.sh agent ~/Downloads/sgn3/kubeconfig.yaml \
-#                     ~/Downloads/sql97/kubeconfig.yaml \
+#   ./deploy.sh agent ~/Downloads/sql97/kubeconfig.yaml \
 #                     ~/Downloads/sql108/kubeconfig.yaml
 #
-#   ./deploy.sh undeploy hub   ~/Downloads/sgn3/kubeconfig.yaml
-#   ./deploy.sh undeploy agent ~/Downloads/sql97/kubeconfig.yaml ~/Downloads/sql108/kubeconfig.yaml
+#   ./deploy.sh undeploy hub
+#   ./deploy.sh undeploy agent ~/Downloads/sql97/kubeconfig.yaml
 #
-# cluster-name defaults to the parent directory of the kubeconfig file:
-#   ~/Downloads/sql108/kubeconfig.yaml → sql108
+# Cluster name is derived from the kubeconfig filename (sgn3.yaml → sgn3)
+# or parent directory (sgn3/kubeconfig.yaml → sgn3).
 #
 # Requirements: kubectl
 
@@ -162,21 +164,68 @@ EOF
   log "API:                http://$node_ip:30080"
   log "Grafana:            http://$node_ip:30300  (admin / admin)"
   log ""
-  log "Next: ./deploy.sh agent $kubeconfig <agent-kubeconfig>..."
+  log "Next: ./deploy.sh agent <agent-kubeconfig>..."
 }
 
 # ─── agent ────────────────────────────────────────────────────────────────────
 
-deploy_agents() {
-  local hub_kubeconfig="$1"
-  shift
+# Interactively resolve which kubeconfig points at the hub cluster.
+# - If $KUBECONFIG is set, ask whether it is the hub; let user override if not.
+# - If $KUBECONFIG is unset, prompt for a path.
+# Prints "<confirmed|unconfirmed>:<path>" to stdout.
+# confirmed  = user said "y" to the hub question — no second prompt needed
+# unconfirmed = user typed a path manually — caller should show Proceed? prompt
+resolve_hub_kubeconfig() {
+  local hub_kc=""
 
-  # Query the node IP directly from the hub cluster — no local file dependency
+  if [[ -n "${KUBECONFIG:-}" ]]; then
+    echo "" >&2
+    echo "Hub cluster (where Kafka runs):" >&2
+    echo "  current \$KUBECONFIG: $KUBECONFIG" >&2
+    echo "" >&2
+    printf "Is this where the hub is running? [y/N] " >&2
+    read -r answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      echo "confirmed:$KUBECONFIG"
+      return
+    fi
+  fi
+
+  printf "Hub kubeconfig path: " >&2
+  read -r hub_kc
+  hub_kc=$(eval echo "$hub_kc")   # expand ~ in the path
+  echo "unconfirmed:$hub_kc"
+}
+
+deploy_agents() {
+  local resolved
+  resolved=$(resolve_hub_kubeconfig)
+  local confirmed="${resolved%%:*}"       # "confirmed" or "unconfirmed"
+  local hub_kubeconfig="${resolved#*:}"   # everything after the first ":"
+
   use_kubeconfig "$hub_kubeconfig"
   local kafka_ip
   kafka_ip=$(get_node_ip)
   [[ -z "$kafka_ip" ]] && die "could not determine hub node IP from $hub_kubeconfig"
-  log "hub node IP (Kafka): $kafka_ip:$KAFKA_EXTERNAL_PORT"
+
+  # Build display list of agent target names
+  local targets=()
+  for kc in "$@"; do
+    targets+=("$(derive_cluster_name "$kc")")
+  done
+  local targets_str
+  targets_str=$(IFS=", "; echo "${targets[*]}")
+
+  echo ""
+  echo "  hub kubeconfig: $hub_kubeconfig"
+  echo "  kafka IP      : $kafka_ip:$KAFKA_EXTERNAL_PORT"
+  echo "  agent targets : $targets_str"
+  echo ""
+  if [[ "$confirmed" == "unconfirmed" ]]; then
+    printf "Proceed? [y/N] "
+    read -r answer
+    [[ "$answer" =~ ^[Yy]$ ]] || die "aborted"
+  fi
 
   for kubeconfig in "$@"; do
     local cluster_name
@@ -191,7 +240,7 @@ deploy_agents() {
 _apply_agent() {
   local cluster_name="$1"
   local kafka_ip="$2"
-  local kafka_port="${3:-9094}"   # default 9094 (EXTERNAL); hub agent passes 9092 (PLAINTEXT)
+  local kafka_port="${3:-$KAFKA_EXTERNAL_PORT}"   # default 30094 (NodePort); hub agent passes 9092 (PLAINTEXT)
 
   kubectl apply -f k8s/agent/serviceaccount.yaml
 
@@ -248,7 +297,7 @@ case "${1:-}" in
     deploy_hub "${2:-}" "${3:-}"   # kubeconfig optional — falls back to $KUBECONFIG
     ;;
   agent)
-    [[ $# -ge 3 ]] || usage
+    [[ $# -ge 2 ]] || usage
     shift
     deploy_agents "$@"
     ;;

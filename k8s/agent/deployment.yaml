@@ -24,7 +24,7 @@ spec:
             - name: CLUSTER_NAME
               value: "REPLACE_CLUSTER_NAME"   # e.g. sql107
             - name: KAFKA_BROKERS
-              value: "REPLACE_KAFKA_IP:9094"  # Kafka LoadBalancer external IP
+              value: "REPLACE_KAFKA_IP:9094"  # replaced by deploy.sh with <node-ip>:<NodePort>
             - name: KAFKA_TOPIC
               value: "vm-metrics-ts"
             - name: SCRAPE_INTERVAL_SECONDS
