@@ -243,7 +243,7 @@ curl http://localhost:8081/metrics/rancher-desktop/summary
 
 ---
 
-### Checkpoint 6 — Full stack + Grafana dashboard [ ]
+### Checkpoint 6 — Full stack + Grafana dashboard [DONE]
 
 **Goal:** `docker-compose up` brings everything up. Grafana dashboard shows per-VM
 time-series and 1-hour summaries.

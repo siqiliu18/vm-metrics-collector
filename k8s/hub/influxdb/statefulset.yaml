@@ -34,13 +34,13 @@ spec:
             - name: DOCKER_INFLUXDB_INIT_USERNAME
               value: "admin"
             - name: DOCKER_INFLUXDB_INIT_PASSWORD
-              value: "adminpassword"
+              value: "adminpassword"   # store in a Kubernetes Secret in production
             - name: DOCKER_INFLUXDB_INIT_ORG
               value: "vm-metrics"
             - name: DOCKER_INFLUXDB_INIT_BUCKET
               value: "metrics"
             - name: DOCKER_INFLUXDB_INIT_ADMIN_TOKEN
-              value: "my-super-secret-token"
+              value: "my-super-secret-token"   # same value used by consumer, api, grafana — store in a Secret in production
           volumeMounts:
             - name: influxdb-data
               mountPath: /var/lib/influxdb2

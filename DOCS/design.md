@@ -1,4 +1,4 @@
-# vm-metrics-collector — Design Document (World 1)
+# vm-metrics-collector — Design Document
 
 ## Overview
 
@@ -109,8 +109,6 @@ vm-metrics-collector/
 │       ├── main.go          ← REST query layer over InfluxDB
 │       └── Dockerfile
 ├── internal/
-│   ├── metrics/             ← k8s Metrics API client (metrics.k8s.io/v1beta1)
-│   │                           used by: cmd/agent
 │   ├── kafka/               ← producer helper + consumer helper
 │   │                           used by: cmd/agent (producer), cmd/consumer (consumer)
 │   └── influx/              ← InfluxDB write client + query client
@@ -356,71 +354,80 @@ rules:
 
 No kubeconfig file. No `~/.kube/` copying. No VPN.
 
-### Hub cluster — sql107
+### Hub cluster — sgn3
 
-sql107 is both the hub (runs the central stack) and a monitored cluster (runs an agent pod).
+sgn3 is both the hub (runs the central stack) and a monitored cluster (runs an agent pod).
 No separate machine is needed — one cluster plays both roles.
 
 ```
-sql107:
+sgn3:
   hub stack:  Kafka + InfluxDB + consumer + API + Grafana
-  agent pod:  scrapes sql107's own nodes → pushes to local Kafka
+  agent pod:  scrapes sgn3's own nodes → pushes to local Kafka via PLAINTEXT (port 9092)
 ```
 
-Why sql107 and not Rancher Desktop?
-- Rancher Desktop is on a laptop — not always on, no real LoadBalancer support
-- sql107 is always running, cloud LoadBalancers work properly there
+Why sgn3 and not Rancher Desktop?
+- Rancher Desktop is on a laptop — not always on, no stable node IP
+- sgn3 is always running (IBM Fyre bare-metal, 16CPU/64GB)
 
-### Deployment order
+### Kafka two-listener design
 
-```
-# 1. On sql107 — deploy Kafka service first to get the LoadBalancer IP
-kubectl apply -f k8s/hub/kafka/service.yaml
-kubectl get svc kafka-external -n monitoring --watch   # wait for EXTERNAL-IP
+Kafka must advertise a different address to internal vs external clients:
 
-# 2. Fill in the real IP in ONE place, then deploy the rest of the hub
-#    Edit k8s/hub/kafka/statefulset.yaml: replace REPLACE_KAFKA_LB_IP
-#    Edit k8s/agent/deployment.yaml:      replace REPLACE_ME (KAFKA_BROKERS)
-kubectl apply -f k8s/hub/kafka/statefulset.yaml
-kubectl apply -f k8s/hub/influxdb/
-kubectl apply -f k8s/hub/consumer/
-kubectl apply -f k8s/hub/api/
-kubectl apply -f k8s/hub/grafana/
+| Listener | Port | Advertised address | Used by |
+|---|---|---|---|
+| PLAINTEXT | 9092 | `kafka-0.kafka-headless.monitoring.svc.cluster.local:9092` | consumer pod, hub agent |
+| EXTERNAL | 9094 | `<node-ip>:30094` (NodePort) | agent pods on other clusters |
 
-# 3. Deploy agent on sql107 itself (CLUSTER_NAME=sql107)
-kubectl apply -f k8s/agent/
+**Critical:** `ADVERTISED_LISTENERS` for EXTERNAL must use the **NodePort (30094)**, not the
+pod port (9094). Kafka clients bootstrap via NodePort, then reconnect to the advertised address.
+If that address is the pod port (9094), the reconnect fails because nothing listens on 9094 on the node.
 
-# 4. On each other cluster — deploy agent only
-#    Set CLUSTER_NAME=sqlXXX in deployment.yaml per cluster
-#    KAFKA_BROKERS is the same LB IP for all clusters
-kubectl apply -f k8s/agent/
+**Hub agent exception:** The hub's own agent connects via PLAINTEXT (port 9092) because
+pod→nodeIP→NodePort (hairpin NAT) is not supported on bare-metal clusters.
+
+### Deployment
+
+Use `deploy.sh` — do not apply manifests directly. Kafka's `ADVERTISED_LISTENERS` must
+contain the real node IP, which `deploy.sh` substitutes at deploy time via `sed`:
+
+```bash
+# Deploy hub stack (prompts for confirmation)
+./deploy.sh hub ~/Downloads/sgn3/kubeconfig.yaml
+
+# Deploy agents on monitored clusters (prompts for hub cluster)
+./deploy.sh agent ~/Downloads/sql97/kubeconfig.yaml \
+                  ~/Downloads/sql108/kubeconfig.yaml
+
+# Tear down
+./deploy.sh undeploy hub
+./deploy.sh undeploy agent ~/Downloads/sql97/kubeconfig.yaml
 ```
 
 ### What each cluster runs
 
 ```
-sql107 (hub + monitored):
-  k8s/hub/kafka/       — StatefulSet + LoadBalancer Service (external) + headless Service (internal)
-  k8s/hub/influxdb/    — StatefulSet + PVC
-  k8s/hub/consumer/    — Deployment
-  k8s/hub/api/         — Deployment + LoadBalancer Service
-  k8s/hub/grafana/     — Deployment + ConfigMap + LoadBalancer Service
-  k8s/agent/           — agent pod, CLUSTER_NAME=sql107
+sgn3 (hub + monitored):
+  k8s/hub/kafka/    — StatefulSet (KRaft) + NodePort Service (30094) + headless Service
+  k8s/hub/influxdb/ — StatefulSet + PVC
+  k8s/hub/consumer/ — Deployment
+  k8s/hub/api/      — Deployment + NodePort Service (30080)
+  k8s/hub/grafana/  — Deployment + ConfigMap + NodePort Service (30300)
+  k8s/agent/        — agent pod, CLUSTER_NAME=sgn3, connects via PLAINTEXT:9092
 
-sql97, sql108, sql109, sql120 (monitored only):
-  k8s/agent/           — agent pod, CLUSTER_NAME=sqlXXX, KAFKA_BROKERS=<LB-IP>:9094
+sql108, sql120, siqiocp3, ... (monitored only):
+  k8s/agent/        — agent pod, CLUSTER_NAME=<cluster>, KAFKA_BROKERS=<node-ip>:30094
 ```
 
-### The Kafka listener chicken-and-egg
+### NodePort vs LoadBalancer
 
-Kafka's `ADVERTISED_LISTENERS` must contain the LoadBalancer IP at startup, but the IP
-only exists after the Service is created. The sequence handles this:
+IBM Fyre bare-metal clusters don't have a cloud load balancer controller.
+NodePort is used instead — agents connect directly to the node IP on the assigned port.
 
-1. Create the Service first → IP gets assigned by the cloud provider
-2. Fill the IP into `statefulset.yaml` → deploy Kafka with the correct address
-3. Agents point to the same IP
-
-This is a one-time setup step. Once deployed, the IP is stable.
+| Service | NodePort | Purpose |
+|---|---|---|
+| kafka-external | 30094 | Kafka EXTERNAL listener for agents on other clusters |
+| api | 30080 | REST API for external queries |
+| grafana | 30300 | Grafana dashboard |
 
 ### File structure
 
@@ -428,24 +435,21 @@ This is a one-time setup step. Once deployed, the IP is stable.
 k8s/
 ├── hub/
 │   ├── kafka/
-│   │   ├── statefulset.yaml
-│   │   └── service.yaml        ← LoadBalancer type
+│   │   ├── statefulset.yaml   ← REPLACE_KAFKA_LB_IP substituted by deploy.sh
+│   │   └── service.yaml       ← NodePort 30094 (external) + headless (internal)
 │   ├── influxdb/
 │   │   ├── statefulset.yaml
-│   │   ├── pvc.yaml
-│   │   └── service.yaml
+│   │   └── service.yaml       ← ClusterIP only (internal)
 │   ├── consumer/
 │   │   └── deployment.yaml
 │   ├── api/
-│   │   ├── deployment.yaml
-│   │   └── service.yaml
+│   │   └── deployment.yaml    ← includes NodePort Service (30080)
 │   └── grafana/
-│       ├── deployment.yaml
-│       ├── service.yaml
-│       └── configmap.yaml      ← provisioning files (replaces bind mount)
+│       ├── deployment.yaml    ← includes NodePort Service (30300)
+│       └── configmap.yaml     ← dashboard + datasource provisioning
 └── agent/
-    ├── serviceaccount.yaml
-    └── deployment.yaml
+    ├── serviceaccount.yaml    ← ClusterRole for metrics.k8s.io/nodes
+    └── deployment.yaml        ← REPLACE_CLUSTER_NAME + REPLACE_KAFKA_IP substituted by deploy.sh
 ```
 
 ---
@@ -454,12 +458,11 @@ k8s/
 
 | Cluster         | Type         | World 1 role                    | World 2 role                               |
 |-----------------|--------------|---------------------------------|--------------------------------------------|
-| Rancher Desktop | Local k8s    | Dev + smoke test                | Dev only — no LoadBalancer, not always on  |
-| sql107          | Remote k8s   | Metrics source (via VPN)        | Hub + monitored — central stack + agent    |
-| sql97           | Remote k8s   | Metrics source (via VPN)        | Monitored only — agent pod                 |
-| sql108          | Remote k8s   | Metrics source (via VPN)        | Monitored only — agent pod                 |
-| sql109          | Remote k8s   | Metrics source (via VPN)        | Monitored only — agent pod                 |
-| sql120          | Remote k8s   | Metrics source (via VPN)        | Monitored only — agent pod                 |
+| Rancher Desktop | Local k8s    | Dev + smoke test                | Dev only — no stable node IP, not always on |
+| sgn3            | IBM Fyre k8s | —                               | Hub + monitored — central stack + agent     |
+| sql108          | IBM Fyre k8s | Metrics source (via VPN)        | Monitored only — agent pod                  |
+| sql120          | IBM Fyre k8s | Metrics source (via VPN)        | Monitored only — agent pod                  |
+| siqiocp3        | IBM Fyre k8s | Metrics source (via VPN)        | Monitored only — agent pod                  |
 
 ---
 
@@ -511,13 +514,14 @@ docker-compose down -v
 
 ## Definition of Done (World 2)
 
-- [ ] Agent uses `rest.InClusterConfig()` instead of kubeconfig file
-- [ ] Agent Deployment + ServiceAccount + ClusterRole manifests (`k8s/agent/`)
-- [ ] Kafka StatefulSet (3 brokers) + LoadBalancer Service (`k8s/hub/kafka/`)
-- [ ] InfluxDB StatefulSet + PVC (`k8s/hub/influxdb/`)
-- [ ] Consumer Deployment (`k8s/hub/consumer/`)
-- [ ] API Deployment + Service (`k8s/hub/api/`)
-- [ ] Grafana Deployment + ConfigMap for provisioning (`k8s/hub/grafana/`)
-- [ ] Hub stack deployed on sql107, agent deployed on all 5 clusters
-- [ ] `curl <api-service-ip>/vms` returns nodes from all 5 clusters
-- [ ] Grafana dashboard shows metrics from all 5 clusters simultaneously
+- [x] Agent uses `rest.InClusterConfig()` instead of kubeconfig file
+- [x] Agent Deployment + ServiceAccount + ClusterRole manifests (`k8s/agent/`)
+- [x] Kafka StatefulSet (KRaft, single broker) + NodePort Service (`k8s/hub/kafka/`)
+- [x] InfluxDB StatefulSet + PVC (`k8s/hub/influxdb/`)
+- [x] Consumer Deployment (`k8s/hub/consumer/`)
+- [x] API Deployment + NodePort Service (`k8s/hub/api/`)
+- [x] Grafana Deployment + ConfigMap for provisioning (`k8s/hub/grafana/`)
+- [x] `deploy.sh` CLI handles hub + agent deploy/undeploy with confirmation prompts
+- [x] Hub stack deployed on sgn3, agents deployed on multiple clusters
+- [x] `curl http://<node-ip>:30080/vms` returns nodes from all clusters
+- [x] Grafana dashboard shows metrics from all clusters simultaneously

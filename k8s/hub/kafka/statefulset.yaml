@@ -9,14 +9,19 @@ metadata:
 # (requires updating KAFKA_CONTROLLER_QUORUM_VOTERS and per-pod NODE_ID logic).
 #
 # Two listeners:
-#   PLAINTEXT  :9092 — internal, used by consumer pod inside the hub cluster
-#   EXTERNAL   :9094 — used by agent pods on other clusters via LoadBalancer
+#   PLAINTEXT  :9092 — internal, used by consumer pod and hub agent inside the hub cluster
+#   EXTERNAL   :9094 — used by agent pods on other clusters via NodePort 30094
 #
 # Why two listeners?
 #   Kafka tells connecting clients "reconnect to my advertised address".
 #   Internal clients get the headless DNS name (resolvable inside the cluster).
-#   External clients get the LoadBalancer IP (resolvable from anywhere).
+#   External clients get the node IP + NodePort (reachable from other clusters).
 #   A single listener would advertise one address that only works for one side.
+#
+# IMPORTANT: ADVERTISED_LISTENERS for EXTERNAL must use the NodePort (30094), NOT the
+#   pod port (9094). Kafka clients bootstrap via NodePort, then reconnect to the
+#   advertised address. If that advertised address is the pod port (9094), the
+#   reconnect fails because the node is not listening on 9094 — only the pod is.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -61,8 +66,8 @@ spec:
               value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094"
             - name: KAFKA_ADVERTISED_LISTENERS
               # PLAINTEXT advertises the stable headless DNS — resolvable inside the cluster
-              # EXTERNAL advertises the LoadBalancer IP — resolvable from agent pods on other clusters
-              # Replace KAFKA_LB_IP with the actual LoadBalancer IP after `kubectl get svc kafka-external`
+              # EXTERNAL advertises the node IP + NodePort — reachable from agent pods on other clusters
+              # REPLACE_KAFKA_LB_IP is substituted with the actual node IP by deploy.sh at deploy time
               value: "PLAINTEXT://kafka-0.kafka-headless.monitoring.svc.cluster.local:9092,EXTERNAL://REPLACE_KAFKA_LB_IP:30094"
             - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
               value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
