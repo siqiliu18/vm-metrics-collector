@@ -31,12 +31,15 @@ Runs everything on your Mac. Agent scrapes Rancher Desktop (and any remote clust
 docker-compose up --build
 ```
 
-| Service   | URL                              |
-|-----------|----------------------------------|
-| API       | http://localhost:8081            |
-| InfluxDB  | http://localhost:8087            |
+| Service   | URL                                 |
+|-----------|-------------------------------------|
+| API       | http://localhost:8081               |
+| InfluxDB  | http://localhost:8087               |
 | Grafana   | http://localhost:3100 (admin/admin) |
-| Kafka     | localhost:9093                   |
+| Kafka     | localhost:9093                      |
+
+> Ports are remapped from defaults (8080→8081, 8086→8087, 3000→3100, 9092→9093) because
+> Rancher Desktop SSH tunnels occupy those ports. Adjust `docker-compose.yml` if your setup differs.
 
 See [DOCS/docker-compose-notes.md](DOCS/docker-compose-notes.md) for Rancher Desktop quirks.
 
